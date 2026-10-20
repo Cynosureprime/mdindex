@@ -106,8 +106,14 @@
  * went to v3, and called all 16,777,216 buckets unsorted on a good index.
  *
  *
- * $Revision: 1.32 $
+ * $Revision: 1.34 $
  * $Log: mdindex.c,v $
+ * Revision 1.34  2026/10/20 17:21:08  dlr
+ * Three reproduced traps: a lost word, a raw plaintext, and a stale overlay. Reported against 1.32 by Waffle, all three reproduced here before being touched. FIRST, a word was lost whenever an update met a source whose last line had no terminator. consumed was set to the file SIZE, which asserts that the final partial line is finished, so the next update began in the middle of a word: a file ending bet, with a-newline-gamma-newline appended, indexed bet and then a and never beta. Two words were unreachable, not one -- bet had a record too, naming an offset that now reads beta and fails its re-hash. consumed_to now stops at the byte after the last newline, so an unterminated tail is re-read until it is terminated, which costs a few re-hashed lines that dedup drops. The tail is still INDEXED at build, so a file that simply ends without a newline keeps its last word. The fingerprint had to move with it: it was taken over size while files_check recomputes over consumed, and the mismatch made every source read as rewritten. SECOND, plaintexts were printed raw. needs_hex was correct and matched mdxfinds own dohex rule, but emit_hit never reached it: every type sets verbatim, and that branch printed the source line and returned. A colon made the line ambiguous, a high byte went out unwrapped, and a NUL TRUNCATED the plaintext -- printf stops at a NUL whatever precision it is given -- so the line claimed a word that does not produce its hash. All output now goes through emit_line, which writes with fwrite rather than a precision conversion and wraps on mdxfinds rule: any byte below 0x20 or above 0x7e, or a colon. The verbatim path applies only the BYTE test, never the wrapper-prefix test, because an already-wrapped line is plain ASCII and re-wrapping would double it. THIRD, a build left the previous overlay in place. add.rec describes words at locators in the OLD sources; at best its records are rejected one at a time, and at worst its locator names a source the new manifest does not have, which is fatal at the first lookup -- FATAL record names file index 1 of 1, on a database build had just reported as finished. check calls such an overlay clean, because every record in it is well formed; what is wrong is that it belongs to a database that no longer exists. build now unlinks it. Verified: beta resolves and so do its neighbours, a file ending without a newline keeps its last word, a colon, a high byte and an embedded NUL all emit as $HEX[] and pass hashpipe -c, a rebuild after an update leaves no overlay and no FATAL, selftest passes, and both live databases read and check unchanged.
+ *
+ * Revision 1.33  2026/10/20 17:03:56  dlr
+ * Index the HUM families: a second enumerated domain, and a reported salt that differs from the bound one. The seven HUM types were absent from every index because they carried no hx expression; with hx.8 1.98 supplying one they need the enumeration machinery to generalise. enumsalt was a flag meaning walk the 256 two-hex salts and is now enumdom, naming a domain, with hex2 and humsep behind edom_count and edom_value. humsep is eight line-ending sequences held as HEX because the first is a NUL byte, which the expressions decode with fromhex. The substantive change is that the value BOUND to salt in the expression and the value REPORTED in the output line are no longer the same thing. For hex2 they coincide. For humsep mdxfind prints the separator followed by the inner-iteration index, 0d0a- x 1, and reporting the bound value instead would emit a line hashpipe cannot verify. hout.salt grows from 8 bytes to 24 to hold it; at 8 it could not have held 0d0a- x 1 at all, and the %s would have run past the array. An unknown domain in a manifest is fatal rather than ignored, because a domain this build cannot walk would index one digest per word where the database holds sixteen and answer for a fraction of itself without saying so. N, the inner iteration, is not indexed: mdxfind emits x 1 by default and that is what all 112 vectors are, so a deeper N would multiply the set again. -H all goes from 544 types to 551 and from 4,884 records per word to 5,026, a 2.9 percent rise. Verified: 112 of 112 digests found, all 112 emitted lines byte-identical to mdxfinds including the salt field, all 112 verified by hashpipe, HEXSALT unchanged, selftest passing, and the live index still reads and checks clean through the old hex2 manifest row.
+ *
  * Revision 1.32  2026/10/20 15:04:00  dlr
  * Clear hout.salt before a variant slot is filled. emit_hit chooses between hash colon plain and hash colon salt colon plain by testing salt[0], and the six native arms never wrote that field: h_md5 and the rest set dig, plain, plen and verbatim and nothing else, while the hx path always set it because slen is zero for a type that enumerates nothing. hv is a per-thread heap buffer reused for every word, so an ordinary type read whatever was left there. Undefined behaviour, and platform-dependent in the worst way: macOS hands back zeroed pages so the branch never fired and the defect was invisible to every test run here, including the full selftest, the Windows selftest under wine, and 1081 types cross-checked against mdxfind. On Linux a plain MD5 lookup printed MD5x01 5f4dcc3b...cf99 colon 09cb7 tab ba! colon password -- a salt field full of debris in front of a correct answer, on a type that has no salt -- and the %s ran past the eight-byte array as well, nothing having terminated it. Cleared for every slot at the top of type_hash rather than in each of the six arms, so both paths are covered and a seventh arm cannot reintroduce it. Found by building the published tree from a clean clone in Docker on 192.168.22.213, which is the only configuration that could see it. Verified on Linux: the same lookup now gives cf99 colon password byte for byte, natively and through the container, the enumerated SHA1HEXSALT still reports its salt as 476649c6...:0a:098765, and the selftest passes on Linux, macOS and Windows.
  *
@@ -491,7 +497,7 @@ extern int mdindex_bridges_register(void);
 #define DEVNULL "/dev/null"
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.32 2026/10/20 15:04:00 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.34 2026/10/20 17:21:08 dlr Exp dlr $";
 static const char *Prog = "mdindex";
 
 extern void qsort_mt(void *a, size_t n, size_t es,
@@ -874,6 +880,75 @@ static int md_unwrap(const unsigned char *s, size_t slen,
  * is what mdxfind emits and therefore what the index must hold. */
 #define MDX_MAXSHAPE    4
 #define MDX_HEXSALTS    256
+
+/* ENUMERATED DOMAINS.
+ *
+ * A type in one of these supplies its own salt values instead of taking
+ * one with the hash, so it stays a function of the password alone and
+ * can be indexed -- at one record per member per shape.
+ *
+ *   hex2    the HEXSALT family: all 256 two-hex salts
+ *   humsep  the HUM family: eight line-ending sequences
+ *
+ * The HUM separators are written as HEX and the expressions decode them
+ * with fromhex(), because the first of them is a NUL byte -- mdxfind's
+ * table is NUL-delimited and an empty entry is taken as one NUL
+ * (`if (i == 0) i = 1`), which its own output confirms by reporting that
+ * member as salt "00".  A string literal cannot carry it, and hx takes
+ * "\r\n" literally rather than as CR LF, so fromhex() is the only form
+ * that reproduces mdxfind here. */
+enum { EDOM_NONE = 0, EDOM_HEX2, EDOM_HUMSEP };
+
+static const char *const Humsep[] = {
+    "00", "20", "0d", "0d0a", "0a", "0d0d", "0a0a", "0a0d"
+};
+#define MDX_HUMSEPS ((int)(sizeof(Humsep) / sizeof(Humsep[0])))
+
+static int edom_by_name(const char *d)
+{
+    if (d == NULL)                   return EDOM_NONE;
+    if (strcmp(d, "hex2") == 0)      return EDOM_HEX2;
+    if (strcmp(d, "humsep") == 0)    return EDOM_HUMSEP;
+    FATAL("unknown enumerated domain '%s' -- this build carries hex2 and "
+          "humsep", d);
+    return EDOM_NONE;
+}
+
+static const char *edom_name(int d)
+{
+    return d == EDOM_HEX2 ? "hex2" : d == EDOM_HUMSEP ? "humsep" : "none";
+}
+
+static int edom_count(int d)
+{
+    return d == EDOM_HEX2 ? MDX_HEXSALTS : d == EDOM_HUMSEP ? MDX_HUMSEPS : 1;
+}
+
+/* The value BOUND to `salt` in the expression, and the value REPORTED in
+ * the output line.  Identical for hex2; different for humsep, where
+ * mdxfind prints "<hex>- x 1" -- the separator and the inner-iteration
+ * index, which is 1 for every digest this indexes.  Reporting the bound
+ * value there would emit a line hashpipe cannot verify. */
+static void edom_value(int d, int i, char *bound, size_t bsz,
+                       char *reported, size_t rsz)
+{
+    static const char hexd[] = "0123456789abcdef";
+
+    switch (d) {
+    case EDOM_HEX2:
+        snprintf(bound, bsz, "%c%c", hexd[(i >> 4) & 0xf], hexd[i & 0xf]);
+        snprintf(reported, rsz, "%s", bound);
+        break;
+    case EDOM_HUMSEP:
+        snprintf(bound, bsz, "%s", Humsep[i]);
+        snprintf(reported, rsz, "%s- x 1", Humsep[i]);
+        break;
+    default:
+        bound[0] = 0;
+        reported[0] = 0;
+        break;
+    }
+}
 #define NTLM_MAXLEN     MAXLINE         /* ruleproc32.h; mdxfind's own cap  */
 
 struct hout {
@@ -885,7 +960,7 @@ struct hout {
      * its domain, and nothing can re-verify the line without knowing
      * which: mdxfind prints SHA1HEXSALT <hash>:0a:<pass>, so this does
      * too.  Empty for every type that enumerates nothing. */
-    char                 salt[8];
+    char                 salt[24];
 };
 
 typedef int (*hfn)(const unsigned char *p, int n, struct hout *o);
@@ -903,7 +978,7 @@ struct htype {
     hx_program *shape[MDX_MAXSHAPE];  /* extra shapes past prog        */
     char       *sexpr[MDX_MAXSHAPE];  /* their source, for the manifest */
     int         nshape;     /* 1 = prog alone                          */
-    int         enumsalt;   /* 1 = walk all 256 two-hex salts          */
+    int         enumdom;    /* EDOM_*: the domain this type walks, if any */
     int         quiet;      /* indexed, but never reported: at THIS
                              * depth it is another type's stored-form
                              * variant and the label would be noise     */
@@ -1786,7 +1861,7 @@ static int sel_add_hx(int job, const char *catname, const char *expr,
     Htype[Nhtype].job    = job;
     Htype[Nhtype].nshape   = 1;
     Htype[Nhtype].quiet    = quiet;
-    Htype[Nhtype].enumsalt = (enum_dom != NULL);
+    Htype[Nhtype].enumdom  = edom_by_name(enum_dom);
     {
         int k;
         for (k = 0; k < nalso; k++) {
@@ -1864,7 +1939,7 @@ static void sel_expand_iters(void)
                         sel_add_native(&Defsix[d]);
             continue;
         }
-        if (Htype[i].enumsalt) continue;            /* own loop, no MDstart */
+        if (Htype[i].enumdom) continue;             /* own loop, no MDstart */
         if (userdef_is_userop(Htype[i].job)) {
             /* A user type does NOT iterate the way a catalog type does.
              * It has no C arm in mdxfind, so mdxfind's generic loop
@@ -2227,19 +2302,17 @@ static int type_hash(int t, hx_vm *vms, const unsigned char *p, int n,
      * two-hex salts over three shapes: 768 digests for one word, which is
      * exactly what mdxfind emits, so it is what the index must hold. */
     {
-        static const char hexd[] = "0123456789abcdef";
-        char  saltbuf[3];
-        int   nsalt = Htype[t].enumsalt ? MDX_HEXSALTS : 1;
+        char  saltbuf[24], saltrep[24];
+        int   nsalt = edom_count(Htype[t].enumdom);
         int   sh, si, nv = 0;
-
-        saltbuf[2] = 0;
         for (si = 0; si < nsalt; si++) {
             const char *salt = "";
             int slen = 0;
-            if (Htype[t].enumsalt) {
-                saltbuf[0] = hexd[(si >> 4) & 0xf];
-                saltbuf[1] = hexd[si & 0xf];
-                salt = saltbuf; slen = 2;
+            saltrep[0] = 0;
+            if (Htype[t].enumdom) {
+                edom_value(Htype[t].enumdom, si, saltbuf, sizeof(saltbuf),
+                           saltrep, sizeof(saltrep));
+                salt = saltbuf; slen = (int)strlen(saltbuf);
             }
             for (sh = 0; sh < Htype[t].nshape; sh++) {
                 r = hx_vm_run(&vms[Htype[t].vmbase + sh], (const char *)p, n,
@@ -2256,8 +2329,7 @@ static int type_hash(int t, hx_vm *vms, const unsigned char *p, int n,
                 if (hex2bin(r.data, r.len, o[nv].dig) != Htype[t].dlen)
                     FATAL("type %s returned a non-hex digest", Htype[t].name);
                 o[nv].plain = p; o[nv].plen = n; o[nv].verbatim = 1;
-                memcpy(o[nv].salt, salt, (size_t)slen);
-                o[nv].salt[slen] = 0;
+                snprintf(o[nv].salt, sizeof(o[nv].salt), "%s", saltrep);
                 nv++;
             }
         }
@@ -2278,7 +2350,7 @@ static void maxvar_set(void)
          * check, answers most queries and is missing the rest. */
         int mv = Htype[i].fn ? Htype[i].maxvar
                              : Htype[i].nshape *
-                               (Htype[i].enumsalt ? MDX_HEXSALTS : 1);
+                               edom_count(Htype[i].enumdom);
         Htype[i].maxvar = mv;
         if (mv > Maxvar) Maxvar = mv;
     }
@@ -2444,8 +2516,9 @@ static void manifest_write(void)
      * read back as one would answer for a fraction of what it holds. */
     for (i = 0; i < Nhtype; i++) {
         int k;
-        if (Htype[i].enumsalt)
-            fprintf(f, "hxenum\t%s\thex2\n", Htype[i].name);
+        if (Htype[i].enumdom)
+            fprintf(f, "hxenum\t%s\t%s\n", Htype[i].name,
+                    edom_name(Htype[i].enumdom));
         if (Htype[i].quiet)
             fprintf(f, "hxquiet\t%s\n", Htype[i].name);
         for (k = 1; k < Htype[i].nshape; k++)
@@ -2546,10 +2619,11 @@ static void manifest_hxenum(const char *row)
 
     if (sscanf(row, "%63[^\t]\t%31s", name, dom) != 2)
         FATAL("malformed hxenum row in manifest: %s", row);
-    if (strcmp(dom, "hex2") != 0)
-        FATAL("manifest names an enumerated domain '%s' this build does "
-              "not know; it would index a fraction of what it holds", dom);
-    Htype[manifest_find(name, "domain")].enumsalt = 1;
+    /* edom_by_name is fatal on an unknown name, which is what this
+     * needs: a domain this build cannot walk would index one digest per
+     * word where the database holds many, and answer for a fraction of
+     * what it contains without saying so. */
+    Htype[manifest_find(name, "domain")].enumdom = edom_by_name(dom);
 }
 
 /* Provenance only.  The type itself was already rebuilt from its hxtype
@@ -3989,16 +4063,54 @@ static int fetch_line(int fidx, unsigned long long off, char **out, size_t *outl
 
 /* hashpipe.c 1.226 needs_hex, so a line this prints is wrapped on exactly
  * the same bytes hashpipe would wrap it on. */
-static int needs_hex(const unsigned char *pass, int passlen)
+/* mdxfind's rule for the PASSWORD field, from the dohex loop in
+ * checkhashkeylen: any byte below 0x20 or above 0x7e, or a colon.
+ *
+ * The colon is deliberately here and deliberately NOT in mdxfind's
+ * fmt_saltfield, which tests only the byte range: a salt field is
+ * positionally delimited, while a colon inside a password makes the
+ * whole line ambiguous to anything that splits on one. */
+static int hex_bytes_needed(const unsigned char *p, int n)
 {
     int i;
-    for (i = 0; i < passlen; i++) {
-        if ((signed char)(pass[i] + 1) < '!') return 1;
-        if (pass[i] == ':') return 1;
-    }
-    if (passlen >= 5 && memcmp(pass, "$HEX[", 5) == 0) return 1;
-    if (passlen >= 9 && memcmp(pass, "$TESTVEC[", 9) == 0) return 1;
+    for (i = 0; i < n; i++)
+        if ((signed char)(p[i] + 1) < '!' || p[i] == ':') return 1;
     return 0;
+}
+
+static int needs_hex(const unsigned char *pass, int passlen)
+{
+    if (hex_bytes_needed(pass, passlen)) return 1;
+    /* A password that merely STARTS with a wrapper is re-wrapped, so its
+     * spelling cannot be read back as the wrapper it is not.  mdxfind
+     * tests clen > 5 strictly, leaving a password that is exactly
+     * "$HEX[" alone, and this matches it. */
+    if (passlen > 5 && memcmp(pass, "$HEX[", 5) == 0) return 1;
+    if (passlen > 9 && memcmp(pass, "$TESTVEC[", 9) == 0) return 1;
+    return 0;
+}
+
+/* Print "<name> <hex>[:<salt>]:<plain>", wrapping the plaintext when it
+ * cannot be written raw.  Everything goes through here so no path can
+ * emit an unwrapped byte that breaks the line. */
+static void emit_line(const char *name, const char *hex, const char *salt,
+                      const unsigned char *plain, int plen, int wrap)
+{
+    int i;
+
+    printf("%s %s:", name, hex);
+    if (salt != NULL && salt[0]) printf("%s:", salt);
+    if (wrap) {
+        printf("$HEX[");
+        for (i = 0; i < plen; i++) printf("%02x", plain[i]);
+        printf("]\n");
+        return;
+    }
+    /* fwrite, not %.*s: printf stops at a NUL whatever precision it is
+     * given, which silently truncated a plaintext and emitted a line
+     * claiming a word that does not produce the hash. */
+    fwrite(plain, 1, (size_t)plen, stdout);
+    putchar('\n');
 }
 
 /* TYPE hash:plain, the mdxfind shape, so the line pipes into hashpipe.
@@ -4020,28 +4132,21 @@ static void emit_hit(const struct htype *t, const struct hout *v,
     if (t->quiet) return;
     Emitted++;
     bin2hex(v->dig, t->dlen, hex);
-    if (v->salt[0]) {
-        /* hash:salt:plain, the shape mdxfind prints for an enumerated
-         * type and the only one that re-verifies. */
-        if (v->verbatim)
-            printf("%s %s:%s:%.*s\n", t->name, hex, v->salt,
-                   (int)llen, line);
-        else
-            printf("%s %s:%s:%.*s\n", t->name, hex, v->salt,
-                   v->plen, v->plain);
-        return;
-    }
-    if (v->verbatim) {
-        printf("%s %s:%.*s\n", t->name, hex, (int)llen, line);
-        return;
-    }
-    if (needs_hex(v->plain, v->plen)) {
-        printf("%s %s:$HEX[", t->name, hex);
-        for (i = 0; i < v->plen; i++) printf("%02x", v->plain[i]);
-        printf("]\n");
-        return;
-    }
-    printf("%s %s:%.*s\n", t->name, hex, v->plen, v->plain);
+    /* A VERBATIM hit reports the source line as the file spells it, so a
+     * line already stored as $HEX[...] round-trips unchanged -- that is
+     * what the flag is for.  But the line still has to be WRITABLE: one
+     * carrying a colon, a NUL, a control character or a high byte cannot
+     * be printed raw, because the colon splits the field and everything
+     * past a NUL is lost.  Only the byte test applies here, never the
+     * wrapper-prefix test: an already-wrapped line is plain ASCII and
+     * passes it, and re-wrapping would double the wrapper. */
+    if (v->verbatim)
+        emit_line(t->name, hex, v->salt, (const unsigned char *)line,
+                  (int)llen,
+                  hex_bytes_needed((const unsigned char *)line, (int)llen));
+    else
+        emit_line(t->name, hex, v->salt, v->plain, v->plen,
+                  needs_hex(v->plain, v->plen));
 }
 
 /* Timing, reported the way mdxfind reports it: a rate with a magnitude
@@ -4740,6 +4845,50 @@ static void project_build(int updating)
     }
 }
 
+/* How far a source may be marked CONSUMED: the byte after its last
+ * newline, which is its size when the file ends with one.
+ *
+ * A file whose last line has no terminator is still indexed to the end --
+ * the word is there and the index should hold it -- but recording the
+ * whole size as consumed assumes that line is finished, and the next
+ * update then starts in the MIDDLE of a word.  Appending "a\ngamma\n" to
+ * a file ending "bet" indexed "bet" and then "a", and never "beta": the
+ * word the file actually contains was unreachable, and so was "bet",
+ * whose record now named an offset that reads "beta" and fails its
+ * re-hash.  Two words lost to one unterminated line.
+ *
+ * Stopping at the last newline means an unterminated tail is re-read on
+ * every update until it is terminated.  That costs a few re-hashed lines
+ * and the dedup drops them; the alternative costs words. */
+static unsigned long long consumed_to(const struct srcfile *sf)
+{
+    static unsigned char buf[65536];
+    unsigned long long at = sf->size;
+    int fd;
+
+    if (sf->size == 0) return 0;
+    fd = open(sf->path, O_RDONLY | O_BINARY);
+    if (fd < 0) FATAL("open %s: %s", sf->path, strerror(errno));
+    while (at > 0) {
+        size_t want = at > sizeof(buf) ? sizeof(buf) : (size_t)at;
+        ssize_t n;
+        unsigned char *nl;
+
+        n = pread(fd, buf, want, (off_t)(at - want));
+        if (n <= 0) break;
+        for (nl = buf + n; nl > buf; nl--)
+            if (nl[-1] == '\n') {
+                close(fd);
+                return at - want + (unsigned long long)(nl - buf);
+            }
+        at -= (unsigned long long)n;
+    }
+    close(fd);
+    /* No newline anywhere: nothing is complete, so nothing is consumed
+     * and the whole file is re-read next time. */
+    return 0;
+}
+
 static void cmd_build(int argc, char **argv)
 {
     unsigned long long lines = 0, bytes = 0;
@@ -4748,6 +4897,22 @@ static void cmd_build(int argc, char **argv)
 
     if (argc < 1) FATAL("build needs at least one source file");
     if (argc > MAXFILES) FATAL("at most %d source files", MAXFILES);
+
+    /* A build REPLACES the database, so any overlay from the previous one
+     * has to go with it.  An add.rec left behind describes words at
+     * locators in the OLD sources: at best its records are rejected one
+     * by one when the line they name no longer re-hashes, and at worst
+     * its locator names a source the new manifest does not have, which
+     * is fatal at the first lookup --
+     *
+     *     FATAL record names file index 1 of 1
+     *
+     * on a database that build had just reported as finished. `check`
+     * calls such an overlay clean, because every record in it is
+     * internally well formed; what is wrong is that it belongs to a
+     * database that no longer exists. */
+    if (unlink(pathcat("add.rec")) != 0 && errno != ENOENT)
+        FATAL("unlink stale add.rec: %s", strerror(errno));
 
     files_reserve(argc);
     Nfiles = argc;
@@ -4769,8 +4934,8 @@ static void cmd_build(int argc, char **argv)
     part_open();
     for (i = 0; i < Nfiles; i++) {
         Files[i].lines = scatter_file(&Files[i], i);
-        Files[i].consumed = Files[i].size;
-        file_fingerprint(&Files[i], Files[i].size);
+        Files[i].consumed = consumed_to(&Files[i]);
+        file_fingerprint(&Files[i], Files[i].consumed);
         lines += Files[i].lines;
     }
     part_close();
@@ -4851,8 +5016,8 @@ static void cmd_update(int argc, char **argv)
     for (i = 0; i < Nfiles; i++) {
         unsigned long long n = scatter_file(&Files[i], i);
         Files[i].lines   += n;
-        Files[i].consumed = Files[i].size;
-        file_fingerprint(&Files[i], Files[i].size);
+        Files[i].consumed = consumed_to(&Files[i]);
+        file_fingerprint(&Files[i], Files[i].consumed);
         added += n;
     }
     part_close();

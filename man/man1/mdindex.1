@@ -1,6 +1,6 @@
 .\" mdindex(1) -- man-macro reference page
-.\" $Revision: 1.19 $
-.TH MDINDEX 1 "2026-10-20" "mdindex 1.32" "Password Recovery"
+.\" $Revision: 1.20 $
+.TH MDINDEX 1 "2026-10-20" "mdindex 1.33" "Password Recovery"
 .SH NAME
 mdindex \- index very large wordlists by hash, and look words up by digest
 .SH SYNOPSIS
@@ -143,22 +143,23 @@ digest stops being a function of the word, and salts arrive with the hashes
 at crack time, long after the build.  That rule is a predicate over
 .BR mdxfind 's
 table rather than a list kept here, so a type whose flags are corrected
-becomes indexable with nothing to edit.  Of 1,061 types, 620 qualify, and 519 of
+becomes indexable with nothing to edit.  Of 1,061 types, 620 qualify, and 551 of
 those additionally carry an expression this build can compile, prove, and
 tell apart from a type it already holds;
 those are what
 .B \-H all
 selects.  The shortfall is the catalog's outlier rows, which carry markup
 instead of an expression; the families that emit several digests per word;
-those that enumerate their own salt domain, which this build does not yet
-do; and those that differ from a selected type only in output form, which
-is no difference once the digest is stored as bytes.
+and those that differ from a selected type only in output form, which is
+no difference once the digest is stored as bytes.
 .PP
 A type that enumerates its own values IS indexable, because its digests
-remain a function of the password alone.  The HEXSALT family walks all 256
-two-hex salts and emits three shapes for each, so one word yields 768
-digests; the enumeration is declared in the catalog rather than inferred,
-and the matching salt is reported in the output line as
+remain a function of the password alone.  Two families do.  The HEXSALT
+family walks all 256 two-hex salts over three shapes, so one word yields
+768 digests.  The seven HUM types walk eight line-ending separators over
+two placements, after and before the hex of an inner digest, for 16.
+Both enumerations are declared in the catalog rather than inferred, and
+the matching member is reported in the output line as
 .IR hash : salt : plain ,
 because nothing could re-verify the line without it.  A salt that must be
 SUPPLIED is still refused \(em it is not known at build time and never

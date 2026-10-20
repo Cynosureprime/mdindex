@@ -15,17 +15,17 @@ is a perfect way to analyze a new, unknown-type hash list.
 ```
 $ mdindex -d ~/.mdindex/ident -i 2 -H all build 10kpass.txt
 projection  10,001 lines x 4914.09 records/line = 49,145,851 records
-            scratch 843.6 MB, new index 703.0 MB, peak 2.2 GB; 12.9 TB free
-  10kpass.txt                     10,001 lines     5.0s
-hashed 10,001 lines (73,018 bytes) in 5.6s -- 1.80K lines/sec, 13.12KB/sec
-48,840,100 records, 304,834 duplicates dropped, 2.7s
-done in 8.3s
+            scratch 862.9 MB, new index 719.1 MB, peak 2.2 GB; 12.9 TB free
+  10kpass.txt                     10,001 lines    10.4s
+hashed 10,001 lines (73,018 bytes) in 11.0s -- 905.92 lines/sec, 6.61KB/sec
+49,960,212 records, 304,834 duplicates dropped, 2.8s
+done in 13.9s
 ```
 
 `-H all` takes every type that is a function of the password alone and that
-this build can compile and prove — **544** of them — and `-i 2` indexes each
-one at iterations 1 and 2, for **1,081** types in all. Iterating is worth the
-doubling: of the 238 types that named something in the run below, 44 were
+this build can compile and prove — **551** of them — and `-i 2` indexes each
+one at iterations 1 and 2, for **1,088** types in all. Iterating is worth the
+doubling: of the 243 types that named something in the run below, 44 were
 reachable only at `x02`. See [Choosing hash types](../README.md#choosing-hash-types) for what that
 excludes and why. The wordlist should be small and *common* — a list of the
 passwords people actually choose, not a dictionary. Ten thousand is enough
@@ -58,8 +58,10 @@ query shorter than a digest works, and mdindex prints the whole digest it matche
 
 **`MD5HEXSALTx01` is the case that justifies the expense.** That family
 enumerates its own 256 salts, costing 768 records per word, and **1,875 of
-the 27,067 identified digests carry no other name** — 7% of the answer, for
-one family. A salted type is normally
+the 27,099 identified digests carry no other name** — 7% of the answer, for
+one family. The seven HUM types are the same argument at 1/48th the cost:
+eight line-ending separators over two placements, 16 records per word,
+and **32 digests that nothing else names** — every one of their hits. A salted type is normally
 unindexable because the salt arrives with the hash; this one is indexable
 precisely because it supplies its own. Its output carries the salt it
 matched, since nothing could re-verify the line without it:
@@ -114,11 +116,11 @@ reproducible; times are not.
 | | words | types | records | `index.rec` | on disk | build |
 |---|---|---|---|---|---|---|
 | default index | 4,147,323,844 | 6 | 15,093,499,954 | 226.4 GB | 226.5 GB | hours |
-| ident, `-i 2 -H all` | 10,001 | 1,081 | 48,840,100 | 732.6 MB | 866.8 MB | **8.3 s** |
+| ident, `-i 2 -H all` | 10,001 | 1,088 | 49,960,212 | 749.4 MB | 883.6 MB | **13.9 s** |
 | the same, no HEXSALT | 10,001 | 1,072 | 10,416,259 | 156.2 MB | 290.5 MB | **3.1 s** |
 
-That is **4,884 records per word**, and the cost is linear in words: a
-wordlist of *n* words takes very close to `n x 4,884 x 15` bytes and
+That is **4,996 records per word**, and the cost is linear in words: a
+wordlist of *n* words takes very close to `n x 4,996 x 15` bytes and
 proportional time. The relation holds to one part in ten thousand at a
 hundred thousand words: ten times the input, ten times the records.
 
@@ -139,16 +141,16 @@ index and 46% of the one without HEXSALT.
 ### Lookup
 
 The index was queried with **53,201,030** hashes — a 1.76 GB file of 32-hex
-digests — in **140 seconds** on a purged cache:
+digests — in **154 seconds**:
 
 ```
-36,741 hits for 27,067 of 53,201,030 hashes, lookup time 139.555s
+36,773 hits for 27,099 of 53,201,030 hashes, lookup time 153.793s
 ```
 
 That is the whole-file case, where mdindex abandons per-query probes and
 reads the index sequentially, so the time tracks the index size rather than
 the query count; a few thousand queries against the same index answer in
-milliseconds. 238 distinct types appeared, and 183 of them matched a type
+milliseconds. 243 distinct types appeared, and 187 of them matched a type
 the corpus was already known to contain — out of 576 such types in all.
 380K hashes per second, helping you to resolve a completely unknown list
 in a couple of minutes.

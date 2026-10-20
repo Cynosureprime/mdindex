@@ -9,6 +9,13 @@ static const char *const _also_184[] = { "sha1(md5(salt . pass) . salt)", "sha1(
 static const char *const _also_185[] = { "sha256(md5(salt . pass) . salt)", "sha256(md5(salt . pass) . \":\" . salt . \":\")" };
 static const char *const _also_186[] = { "gost(md5(salt . pass) . salt)", "gost(md5(salt . pass) . \":\" . salt . \":\")" };
 static const char *const _also_187[] = { "hav128(md5(salt . pass) . salt)", "hav128(md5(salt . pass) . \":\" . salt . \":\")" };
+static const char *const _also_363[] = { "md5(fromhex(salt) . md5(pass))" };
+static const char *const _also_364[] = { "sha1(fromhex(salt) . md5(pass))" };
+static const char *const _also_365[] = { "sha1(fromhex(salt) . sha1(pass))" };
+static const char *const _also_366[] = { "md5(fromhex(salt) . sha1(pass))" };
+static const char *const _also_378[] = { "md5(sha1(fromhex(salt) . md5(pass)))" };
+static const char *const _also_575[] = { "md4(utf16le(fromhex(salt) . md5(pass)))" };
+static const char *const _also_576[] = { "md4(utf16le(fromhex(salt) . sha1(pass)))" };
 
 static const struct hxcat Hxcat[] = {
     { 1, "MD5", "md5(pass)", 1, NULL, NULL, NULL, NULL, 0, NULL },
@@ -373,10 +380,10 @@ static const struct hxcat Hxcat[] = {
     { 360, "MD5SHA1BASE64MD5RAW", "md5(sha1(base64(md5_bin(pass))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 361, "MD5SHA1MD5MD5SHA1", "md5(sha1(md5(md5(sha1(pass)))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 362, "MD5SHA1MD5UC", "md5(sha1(upper(md5(pass))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 363, "MD5MD5HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 364, "SHA1MD5HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 365, "SHA1SHA1HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 366, "MD5SHA1HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 363, "MD5MD5HUM", "md5(md5(pass) . fromhex(salt))", 1, NULL, "salt", "humsep", _also_363, 1, NULL },
+    { 364, "SHA1MD5HUM", "sha1(md5(pass) . fromhex(salt))", 1, NULL, "salt", "humsep", _also_364, 1, NULL },
+    { 365, "SHA1SHA1HUM", "sha1(sha1(pass) . fromhex(salt))", 1, NULL, "salt", "humsep", _also_365, 1, NULL },
+    { 366, "MD5SHA1HUM", "md5(sha1(pass) . fromhex(salt))", 1, NULL, "salt", "humsep", _also_366, 1, NULL },
     { 367, "MD5-MD5SALTMD5PASS", "md5(md5(salt) . md5(pass))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 368, "MD5NTLM", "md5(md4(utf16le(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 369, "NTLM", "md4(utf16le(pass))", 1, NULL, NULL, NULL, NULL, 0, NULL },
@@ -388,7 +395,7 @@ static const struct hxcat Hxcat[] = {
     { 375, "MD5UCBASE64MD5RAW", "md5_uc(base64(md5_bin(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 376, "MD5UCBASE64SHA1RAW", "md5_uc(base64(sha1_bin(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 377, "MD5SHA1MD5MD5UC", "md5(sha1(md5(upper(md5(pass)))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 378, "MD5SHA1MD5HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 378, "MD5SHA1MD5HUM", "md5(sha1(md5(pass) . fromhex(salt)))", 1, NULL, "salt", "humsep", _also_378, 1, NULL },
     { 379, "LM", "lm(pass)", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 380, "MD5LM", "md5(lm(pass))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 381, "MD5LMUC", "md5(upper(lm(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
@@ -583,8 +590,8 @@ static const struct hxcat Hxcat[] = {
     { 572, "MD5BASE64SHA1MD5", "md5(base64(sha1(md5(pass))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 573, "SHA1DESCRYPT", "sha1(descrypt(pass, salt))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 574, "MD4UTF16DESCRYPT", "descrypt(md4(utf16le(pass)), salt)", 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 575, "MD4UTF16MD5HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 576, "MD4UTF16SHA1HUM", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 575, "MD4UTF16MD5HUM", "md4(utf16le(md5(pass) . fromhex(salt)))", 1, NULL, "salt", "humsep", _also_575, 1, NULL },
+    { 576, "MD4UTF16SHA1HUM", "md4(utf16le(sha1(pass) . fromhex(salt)))", 1, NULL, "salt", "humsep", _also_576, 1, NULL },
     { 577, "BCRYPT256", "bcrypt(sha256(pass), salt, 12)", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 578, "SHA1-MD5PASSSALT", "sha1(md5(pass) . salt)", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 579, "SHA1SHA1PASSSALT", "sha1(sha1(pass) . salt)", 1, NULL, NULL, NULL, NULL, 0, NULL },

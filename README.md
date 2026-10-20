@@ -285,12 +285,13 @@ takes that declaration as the eligibility rule:
 | `j` | a pepper | no |
 
 A type marked `f` and nothing else qualifies. That is **620 of the 1,061**
-types in the catalog, of which **544** also carry an hx expression this
+types in the catalog, of which **551** also carry an hx expression this
 build can compile, prove, and distinguish from a type it already holds —
-those are what `-H all` selects; five of those enumerate their own salt
-domain and cost 768 records per word rather than one. With `-i 2` the
-selection becomes **1,081** types: 543 at `x01`, 538 at `x02` — every one at
-both iterations bar the five enumerated families, which are not iterated —
+those are what `-H all` selects. Twelve of them enumerate their own
+domain: the five HEXSALT types cost 768 records per word, and the seven
+HUM types 16. With `-i 2` the
+selection becomes **1,088** types: 550 at `x01`, 538 at `x02` — every one at
+both iterations bar the twelve enumerated families, which are not iterated —
 plus `MD5RAWUCx02`, whose first round is `x02` and which has no `x01`.
 
 **A digest narrower than the key is refused**, explicitly or through `all`.
@@ -481,10 +482,10 @@ mdindex -d ~/.mdindex/ident < unknown.hashes | awk '{print $1}' \
 
 The modal type names the list. There is no identification mode and none is
 needed: every line mdindex emits carries the type that produced it, so with
-1,081 types in the manifest a hit *is* an identification.
+1,088 types in the manifest a hit *is* an identification.
 
 It is cheap because the type dimension is nearly free and the word dimension
-is what costs. Ten thousand words against 1,081 types is 867 MB and 8.3
+is what costs. Ten thousand words against 1,088 types is 884 MB and 13.9
 seconds to build, against 226 GB for the default index, and it scales
 linearly in words. Querying it with 53.2 million hashes identified **27,067**
 of them under **238** distinct type names. The catch is that
