@@ -1,0 +1,30 @@
+*.o
+*.exe
+*.a
+/mdindex
+.claude/
+
+# make deps build artifacts
+deps/
+openssl/
+# gosthash is MIXED: streebog.c/.h are repo content and dep-streebog
+# compiles them, while sbob_*.c and stribob.h are fetched from brutus.
+gosthash/gost2012/sbob_*.c
+gosthash/gost2012/stribob.h
+gosthash/**/*.o
+gosthash/**/*.a
+bcrypt-master/
+yescrypt/
+mutils/
+sph_*.h
+mhash.h
+rhash.h
+rhash_torrent.h
+md6.h
+sqlite3.c
+sqlite3.h
+
+# Release notes are per-program and belong to this directory only.
+# They feed the GitHub release body and the artifact archives; they are not
+# repo content and are never committed. Never carry notes for another program.
+RELEASE_NOTES.md

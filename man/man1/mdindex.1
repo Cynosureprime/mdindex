@@ -1,0 +1,931 @@
+.\" mdindex(1) -- man-macro reference page
+.\" $Revision: 1.19 $
+.TH MDINDEX 1 "2026-10-20" "mdindex 1.32" "Password Recovery"
+.SH NAME
+mdindex \- index very large wordlists by hash, and look words up by digest
+.SH SYNOPSIS
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-t
+.IR threads ]
+.RB [ \-C
+.IR file ]
+.RB [ \-H
+.IR types ]
+.RB [ \-i
+.IR depth ]
+.RB [ \-vy ]
+.B build
+.I file
+.RI [ file " ...]"
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-t
+.IR threads ]
+.RB [ \-v ]
+.B update
+.RI [ newfile " ...]"
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-v ]
+.RB [ lookup ]
+.RI [ hash " ...]"
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.B info
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-t
+.IR threads ]
+.RB [ \-v ]
+.B compact
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-v ]
+.B check
+.RI [ index | overlay | all ]
+.br
+.B mdindex selftest
+.SH DESCRIPTION
+.B mdindex
+builds a database mapping the digest of every distinct word in a set of
+wordlists back to the file and byte offset where that word is stored, for
+several unsalted hash types at once, and then answers lookups against it.
+Given a hash it prints the word.  The wordlists are not copied; the index
+holds only digests and positions, and the sources must stay where they were.
+.PP
+Output is the
+.BR mdxfind (1)
+shape,
+.I TYPE hash:plain,
+so a line pipes straight into
+.BR hashpipe (1):
+.PP
+.RS
+.nf
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+.fi
+.RE
+.SS The index is deliberately lossy
+A record stores 96 bits of the digest, not all of it, and does not record
+which hash function produced it.  Both are recovered rather than stored: a
+hit is answered by reading the line, regenerating every configured digest of
+it, and comparing against the whole hash you supplied.
+.PP
+So the index is only a filter, and the verification is exact.  A key
+collision costs one wasted read and prints nothing \(em it cannot produce a
+wrong answer.  This is also why adding a hash type costs a table entry and a
+rebuild rather than a format change.
+.SS Partial hashes
+Because the supplied hash is checked in full after the line is read, a
+.I partial
+hash is a perfectly good query.  A query of
+.I q
+bits selects a contiguous run of buckets and, inside them, a contiguous run
+of records, so you decide the cost by how many digits you have \(em the
+counts below are against the 15.1-billion-record index described in
+.BR info :
+.PP
+.RS
+.nf
+24 hex characters  exactly the stored key, about one candidate
+16 hex characters  about one candidate
+12 hex characters  about one candidate
+ 6 hex characters  one bucket, about 900
+ 4 hex characters  256 buckets, about 230,000
+ 2 hex characters  a 256th of the index, about 59 million
+ 1 hex character   a 16th of the index, about 943 million
+.fi
+.RE
+.PP
+The last two lines are why a very short query is accepted only as an argument
+or from a terminal: each candidate costs a seek into a source file, so one
+stray one-character line in a piped list asks for more reads than the rest of
+the list together, and the run looks like a hang.
+.PP
+Every candidate is regenerated and compared against all the digits you
+supplied, and
+.B every match is printed,
+with the full digest rather than the fragment you asked with.  A short query
+against a multi-type index therefore returns hits of several different types,
+which is correct: those digits really are the start of each of those digests.
+.SS Hash types
+Six types are indexed by default, described below.  They are not the limit:
+.B \-H
+selects from
+.BR mdxfind 's
+catalog, and a selected type is computed by the
+.B hx
+expression language \(em the same engine
+.B mdxfind
+and
+.BR hashpipe (1)
+use \(em rather than by a second implementation here, so a type cannot
+compute one digest in this tool and another in those.
+.PP
+A type is indexable only if its digest is a function of the password
+.IR alone .
+.BR mdxfind 's
+own type table declares what each type needs supplied, and anything wanting
+a salt, a userid, a pepper or the structured-load channel is refused: the
+digest stops being a function of the word, and salts arrive with the hashes
+at crack time, long after the build.  That rule is a predicate over
+.BR mdxfind 's
+table rather than a list kept here, so a type whose flags are corrected
+becomes indexable with nothing to edit.  Of 1,061 types, 620 qualify, and 519 of
+those additionally carry an expression this build can compile, prove, and
+tell apart from a type it already holds;
+those are what
+.B \-H all
+selects.  The shortfall is the catalog's outlier rows, which carry markup
+instead of an expression; the families that emit several digests per word;
+those that enumerate their own salt domain, which this build does not yet
+do; and those that differ from a selected type only in output form, which
+is no difference once the digest is stored as bytes.
+.PP
+A type that enumerates its own values IS indexable, because its digests
+remain a function of the password alone.  The HEXSALT family walks all 256
+two-hex salts and emits three shapes for each, so one word yields 768
+digests; the enumeration is declared in the catalog rather than inferred,
+and the matching salt is reported in the output line as
+.IR hash : salt : plain ,
+because nothing could re-verify the line without it.  A salt that must be
+SUPPLIED is still refused \(em it is not known at build time and never
+will be.
+.PP
+Each selected type is then proved before a record is written: it must
+produce a fixed-width, hexadecimal digest that changes with the password.
+That rejects a stored form such as MySQL's starred SQL5 display string, and
+a parameterised entry whose width depends on an unbound argument.  A type
+named explicitly that fails is a fatal error; under
+.B \-H all
+it is skipped.  A type that will not compile at all is always fatal, on
+build and on update alike \(em computing a different digest under a name the
+index already holds would corrupt it silently.
+.PP
+.B MD5x01
+is
+.IR md5(pass) .
+.B MD5x02
+is
+.IR md5(md5(pass)) ,
+where the inner digest is consumed as its 32-character lowercase hex, which
+is what
+.B mdxfind \-i 2
+computes.
+.B SHA256x01
+is
+.IR sha256(pass) .
+.B NTLMx01
+is
+.IR md4(utf16le(pass)) .
+.B SQL5x01
+is
+.IR sha1(sha1_bin(pass)) ,
+the MySQL 4.1+ password hash and
+.BR hashcat (1)
+mode 300.  Note the contrast with
+.BR MD5x02 :
+SQL5 consumes sha1's 20
+.I raw bytes
+where MD5x02 consumes md5's 32 hex characters.  MySQL displays the hash with
+a leading
+.BR * ,
+which is not part of the digest;
+.B mdxfind
+will not load that form and neither will this \(em strip it first.
+.B SHA1x01
+is
+.IR sha1(pass) ,
+.BR hashcat (1)
+mode 100.
+.PP
+NTLM is read up to three ways, as
+.B mdxfind
+reads it: Windows mapped the user's code page into UTF-16LE through its own
+tables rather than zero-extending, so a word is indexed as UTF-8, as CP1251
+and as CP1252, using
+.BR mdxfind 's
+own conversions.  An all-ASCII word collapses to one reading; a word that is
+not well-formed UTF-8 loses the UTF-8 reading and keeps the other two.  For
+the code-page readings the reported plaintext is the UTF-8 spelling of the
+codepoints that were actually hashed, which is
+.I not
+the bytes in the wordlist \(em the same thing
+.B mdxfind
+reports, and the only form that re-verifies.
+.SS Encoding wrappers
+.BI $HEX[ ... ]
+and
+.BI $TESTVEC[ HH " x " N ]
+are ways of writing a word, not decoration on one, so the digest indexed for
+a wrapped line is the digest of the bytes the line
+.I denotes,
+never of its literal text.  A malformed wrapper is not an error: it is
+hashed literally, exactly as
+.BR mdxfind (1)
+and
+.BR hashpipe (1)
+treat it.  On output a line stored wrapped is reported wrapped, because that
+is the spelling the file holds and it already round-trips.
+.SS Priority and duplicates
+A digest is stored once.  When the same word appears in more than one source
+file, the record kept is the one from the file that came
+.B earliest on the build command line.
+That order is recorded in the manifest and every later
+.B update
+honours it; within a file the first occurrence wins.  A word re-appearing in
+an updated file adds nothing to the index.
+.SH COMMANDS
+With no arguments at all,
+.B lookup
+is assumed and hashes are read from standard input.  A bare hash in place of
+a command word is also a lookup.
+.TP
+.BI build " file " ...
+Build a new index from scratch, discarding any existing one.  Arguments are
+in priority order.
+.TP
+.BI update " [newfile ...]"
+Re-read each indexed file from the byte offset where the last build or update
+stopped, and hash only what was appended.  A file named on the
+.B update
+line is
+.I added,
+at the end of the manifest and so at the lowest priority.
+.IP
+.B update
+does not rewrite
+.IR index.rec .
+New records go to
+.IR add.rec ,
+an overlay beside it that
+.B lookup
+searches as well, so absorbing a day of new words costs those words and not
+the index they join \(em the measured case was 164 new records against a
+452 GB rewrite.  A key the main index already holds is dropped rather than
+written, so the overlay tracks new words and not lines read.  See
+.BR compact .
+.IP
+Sources may only GROW.  Before reading, each is checked against the size,
+mtime and the MD5s of the first and last megabyte of the indexed region
+recorded in the manifest.  Appending changes neither fingerprint; truncating,
+rewriting or reordering changes at least one, and is reported as an ALERT
+naming the file and what moved.  Reordering a wordlist invalidates every
+offset into it and forces a full
+.BR build .
+.TP
+.B compact
+Fold the overlay into
+.IR index.rec ,
+through the same two-way merge
+.B build
+uses, and remove
+.IR add.rec .
+This is the only command that rewrites the main index, and it reads and
+writes all of it, so it costs twice the index in I/O however small the
+overlay is.
+.B Nothing needs compacting to be correct:
+a lookup searches both files and gives the same answer either way.  Run it
+when
+.B update
+says the overlay is getting large, or whenever it suits.
+.TP
+.BI check " [index|overlay|all]"
+Read every record and verify that each bucket is strictly increasing on the
+stored key.  A descending pair is a sort failure; an equal pair is a
+duplicate that dedup should have dropped.  Both have one cause, since dedup
+only ever compares adjacent records.
+.IP
+.B check index
+is a full pass over
+.I index.rec
+and costs an index-sized sequential read.
+.B check overlay
+reads only
+.I add.rec
+and is instant; that is the one worth running after an
+.BR update ,
+which cannot have changed
+.IR index.rec .
+The default is both.  Exit 2 means a fault was found.
+.TP
+.BI lookup " [hash ...]"
+Print
+.I TYPE hash:plain
+for every match.  With no argument, or with
+.BR \- ,
+hashes are read from standard input, one per line, case-insensitive hex.
+Nothing is printed for a hash that is absent.  Counts and timings go to standard error, so standard output carries
+solutions or nothing and is safe to pipe.
+.IP
+From a pipe or a file, a line that is not hex, or whose length is outside the
+range of digest sizes this database holds, is skipped without a word and only
+counted \(em the total is printed after the summary.  A mixed file carrying
+salts, plaintexts or blank lines can therefore be fed in as it stands.  Note
+what this excludes: a short
+.I hex
+fragment, which from a pipe is almost always a plaintext that happens to look
+like hex rather than a query anyone meant.
+.IP
+A hash given as an argument, or typed at a terminal, is taken exactly as
+asked, however short, and a malformed one is named on standard error.  That
+is where a deliberate partial query belongs.
+.IP
+A batch from a pipe or a file is read whole, sorted and answered together; a
+terminal is answered a line at a time.  Sorting is what lets a large batch be
+answered by one sequential pass over the index instead of one random read per
+hash, which
+.B mdindex
+switches to automatically above roughly
+.I records * 15 * 340 / 299e6
+queries \(em about 257,000 against the full-size index above.  See
+.B \-v.
+.TP
+.B info
+Print the record and bucket counts, the key width, the hash types the
+database was built with, and the manifest.  Also runs the source checks and
+reports any ALERT.
+.TP
+.B selftest
+Check every digest against a published vector or against what
+.B mdxfind
+prints, check both wrappers, then build a small index in a temporary
+directory and check priority, partial lookup, the NTLM readings and
+staleness detection end to end.  Touches nothing else.
+.SS Reading hashes in
+A query line may carry a non-hex lead-in.  A
+.BR john (1)
+hash names its format in front of the digest, and sometimes a login in
+front of that:
+.PP
+.RS
+.nf
+$dynamic_0$0cc175b9c0f1b6a831c399e269772661
+alice:$dynamic_0$0cc175b9c0f1b6a831c399e269772661
+.fi
+.RE
+.PP
+The digest begins after the second
+.B $
+in every such form, whatever precedes the first, so that is where
+.B mdindex
+resumes.  It does so only when the lead-in was the reason the line did
+not parse, so a line that already read as a digest is never re-read as
+something else.
+.PP
+A
+.I trailing
+field is left attached on purpose.  In a John line it is the salt, and a
+salted digest is not something this index holds; leaving it makes the
+line fail the hex test and be counted among the ignored, rather than
+looked up as though it were unsalted and reported as an ordinary miss.
+.SS Digests narrower than the key
+A type whose digest is shorter than the 12-byte index key cannot be
+indexed and is refused, whether it is named explicitly or reached through
+.BR "\-H all" .
+The scatter copies 12 bytes out of every digest, so a shorter one is read
+past, into whatever happened to follow it in memory: the keys would not
+reproduce between builds and the type would simply stop being found after
+a rebuild, with nothing anywhere saying why.
+.PP
+Three catalog types fall under this \(em
+.BR MYSQL3 ,
+.B MURMUR64A
+and
+.BR MURMUR64AZERO ,
+all eight bytes.  That width is also why they would match things they are
+not: 64 bits of digest against an index keyed on 96.
+.PP
+A type that NESTS one of them is unaffected and is indexed, because
+.B md5(mysql3(pass))
+is an ordinary 16-byte MD5.  The primitives are available; only the bare
+forms are refused.
+.SS Build-cost projection
+Before a
+.B build
+writes anything it projects what the build will cost, and refuses if that
+will not fit:
+.PP
+.RS
+.nf
+projection  10,001 lines x 4892.09 records/line = 48,925,829 records
+            scratch 839.9 MB, new index 699.9 MB, peak 1.5 GB; 1012.0 MB free
+.fi
+.RE
+.PP
+Lines are counted with the same SIMD newline scan
+.BR mdxfind (1)
+uses, over the unindexed tail of each source rather than the whole file,
+and the count is looked up in and written to mdxfind's own line cache when
+.B MDXFIND_CACHE
+is set, keyed on path, size and mtime \(em so the pass usually costs
+nothing, and a file that has grown misses rather than returning a stale
+count.  Records per line is
+.I observed,
+by hashing a sample of the real input through the selected types, because
+the ratio depends on how many lines are non-ASCII and on whether an
+enumerated type is selected: the default six give 6.00 and the full
+catalog at depth 2 gives 4,892.
+.PP
+Peak is scratch plus the new index plus the old one, which survives until
+the rename.  If it exceeds
+.I a tenth
+of the free space on the database filesystem,
+.B build
+prints the projection, writes nothing and exits 1;
+.B \-y
+proceeds.  A tenth rather than a half because a build runs for hours while
+other things write to the same filesystem, and the free-space reading is a
+moment in time and not a reservation.
+.PP
+This is the one place
+.B mdindex
+refuses rather than reports.
+
+.SH OPTIONS
+.TP
+.BI \-d " dir"
+Database directory.  The default is
+.IR /usr/local/share/mdfind .
+.TP
+.BI \-t " threads"
+Worker threads for build and update.  The default is one per online core.
+.TP
+.BI \-C " file"
+Read user-defined hash types from
+.IR file ,
+a stanza file in the format
+.BR mdxfind (1)
+reads as
+.IR userdef.txt :
+a
+.BI [ name ]
+header, an
+.B id
+that
+.B \-H
+selects the type by, and an
+.B hx
+expression taken verbatim to end of line.
+.RS
+.IP
+.nf
+[Cust1]
+id = 47
+hx = sha1(md5(pass)."register")
+.fi
+.RE
+.IP
+The file is named outright.  There is no search path, no default location
+and
+.B MDXFIND_CACHE
+is not consulted, because this file decides what an index
+.IR means :
+a type selected from it is built into the index under its own name, and a
+different file answering to that name later would reinterpret records
+already on disk.  For the same reason the expression is copied into the
+manifest, so
+.B \-C
+is needed to
+.B build
+and never to read: lookup, update, info and compact all take their types
+from the manifest, and a
+.B \-C
+file that has since changed or been deleted cannot alter what the database
+holds.
+.IP
+A user-defined type is indexable on the same terms as a catalog one: it
+must be a function of the password alone.  An expression naming
+.BR salt ,
+.B salt2
+.RB ( sic ),
+.B userid
+or
+.B pepper
+is refused, and here the refusal is permanent rather than provisional \(em
+the catalog's HEXSALT family supplies its own salt from an
+.B mdxfind
+arm that enumerates it, and a user type has no such arm.
+.IP
+Iteration differs too.  A catalog type repeats its
+.I outermost
+call over the previous round's digest; a user type has no
+.B mdxfind
+arm, so
+.BR mdxfind 's
+generic loop re-runs the
+.I whole
+expression with
+.B pass
+bound to the previous digest, and
+.B mdindex
+builds that form.  A user expression that never names
+.B pass
+or that carries a prelude of its own is left at depth 1.
+.TP
+.BI \-H " types"
+Comma-separated hash types to index.  Build only; the set is recorded in the
+manifest.  A type is named in one of six ways, disjoint by grammar so that
+nothing has to be tried in turn:
+.RS
+.IP "e\fIN\fP" 16
+an
+.B mdxfind
+catalog type, as
+.BR e259 .
+.IP "u\fIN\fP" 16
+a user-defined type from the
+.B \-C
+file, named by its
+.B id
+as
+.BR u47 .
+.IP "\fIN\fP" 16
+a
+.BR hashcat (1)
+mode, as
+.BR 300 .
+.IP "dynamic_\fIN\fP" 16
+a
+.BR john (1)
+built-in dynamic format, as
+.BR dynamic_2 .
+.IP "\fBall\fP" 16
+every indexable catalog type.
+.IP "anything else" 16
+a canonical type name, as
+.BR SHA1MD5PASS .
+.RE
+.IP
+A trailing
+.BI : N
+selects
+.BR mdxfind 's
+iteration
+.IR N ;
+the default is 1.  A John label already names one \(em
+.B dynamic_2
+is
+.B MD5x02
+\(em so the two may not be combined.
+.IP
+Of the 132 portable John labels, 96 are indexable and 36 are refused for
+the ordinary reason, a salt or a userid they cannot supply.  Only the
+portable table is consulted: John's config-defined dynamics are numbered
+per machine, so selecting through them would mean one
+.B \-H
+line naming different types on two hosts.  With no
+.B \-H
+the default six are indexed.  Fewer types means a proportionally smaller
+index; see
+.B Hash types
+above for what may be selected and why.  The set is read back from the
+manifest by
+.BR update ,
+so a type can only be added by a full
+.BR build .
+.IP
+.B mdxfind
+iterates by repeating a type's
+.I outermost
+call over the previous round's digest, carrying any case transform with it,
+rather than by nesting the whole expression.  The two readings agree for a
+single-call type and differ for every chain, so a chain that carries
+something other than its printed output declares its step in
+.BR hx (8),
+and
+.B mdindex
+builds the declared form.  A type with no single outermost call and no
+declared step is indexed at depth 1 only, and a type that enumerates its
+own salt domain is not iterated at all, its
+.B mdxfind
+arm having a loop of its own.
+.TP
+.BI \-i " depth"
+Index iterations 1 to
+.I depth
+of every selected type, as
+.BR mdxfind 's
+.B \-i
+does.  Build only; the default is 1.
+.B mdxfind
+iterates a type by applying its OUTERMOST function again to the previous
+round's output, re-rendered as hex in that type's own case convention, so
+iteration 2 of
+.I md5(sha1(pass))
+is
+.I md5(md5(sha1(pass)))
+and not
+.IR md5(sha1(md5(sha1(pass)))) .
+A type whose chain carries something other than its printed output declares
+its own step and is iterated by that instead.  A type with no single
+outermost call has no step to repeat and is indexed at depth 1 only; one
+that enumerates its own salt domain has its own loop and is not iterated.
+.IP
+Depth is counted in the
+.B xNN
+of the type name, not from the type's own first iteration: a chain whose
+first real round is
+.B x02
+yields
+.B x02
+and
+.B x03
+at
+.BR "\-i 3" .
+Each extra depth costs another record per word per type.
+.TP
+.B \-y
+Proceed past the refusal described under
+.B Build-cost projection
+above.  The projection is still printed.
+.TP
+.B \-V
+Print the version and exit.
+.TP
+.B \-v
+Progress during
+.B build
+and
+.BR update ,
+and a per-phase timing breakdown during
+.B lookup
+\(em sort, index probe or scan, fetch and verify, and the number of digests
+regenerated.
+.IP
+Progress is a percentage, in the three phases that can run long: the
+per-source scatter, the 256-partition emit, and an
+.BR update 's
+probe of the index, which is one random seek per new word and the slow
+half of a nightly run.
+.IP
+There is
+.I no
+progress indicator during
+.BR lookup ,
+by design and not by omission.  Its standard output carries solutions and
+is meant to be piped; its standard error carries the counts that go with
+them.  A progress line in the middle of that is noise to a pipeline that
+has no use for it.
+.SH FILES
+.TP
+.I /usr/local/share/mdfind
+Default database directory, overridden by
+.BR \-d .
+.TP
+.I manifest
+Tab-separated text, and the only human-readable file in the database: a
+version line, the hash-type list, a row per hx type carrying its
+expression and any guard, enumerated domain, extra output shape or
+suppressed label, a
+.B hxuser
+row naming the
+.B \-C
+file and
+.B id
+behind each user-defined type, then one row per source file giving index,
+bytes consumed, size, mtime, line count and the head and tail
+fingerprints.
+.IP
+The expressions are here rather than looked up by name because the
+expression
+.I is
+the type: a database whose manifest recorded only
+.B SHA1MD5PASSx01
+could be re-opened by a build whose catalog had since changed that
+expression, with nothing to notice.  This file, not the catalog and not
+any
+.B \-C
+file, is what an existing index means.
+.TP
+.I index.dir
+Bucket directory, 16,777,217 big-endian 64-bit offsets into
+.IR index.rec ,
+one per bucket plus a terminator.
+.TP
+.I index.rec
+The records, 15 bytes each, sorted by key: 9 bytes of digest residue then a
+48-bit locator packing an 11-bit file index and a 37-bit offset.  The other
+24 bits of the 96-bit key are implied by the bucket.  Anything that reads
+this file must take the record width from the same source the writer does:
+a reader carrying its own copy of the constant reports every bucket
+unsorted the first time the format widens, which looks exactly like total
+corruption and is not.
+.TP
+.I add.rec
+The overlay: records added since the last
+.B build
+or
+.BR compact ,
+18 bytes each \(em the whole 96-bit key, then the same 48-bit locator \(em
+sorted, binary-searched, and with no directory of its own.  Written by
+.BR update ,
+removed by
+.BR compact ,
+and searched by every lookup.  A record here is one the main index does not
+hold, so the two files never both answer for the same key.
+.TP
+.I part/
+Scratch partitions, present only while a build or update is running and
+removed on success.  A
+.I part
+directory left behind means the run died; it is safe to delete.  Scratch
+peaks at about 108 bytes per source line with all six types: one 18-byte
+record per line per type, written before dedup.
+.PP
+Everything on disk is big-endian, so the database is portable between
+hosts, and between platforms: a database built on one runs on another
+unchanged.  Limits are 2,048 source files and 137 GB per file.
+.PP
+.B mdindex
+builds on macOS, Linux, FreeBSD and Windows, 64-bit only.  A 32-bit build
+is not offered: the tool exists to address files past the 4 GB a 32-bit
+offset reaches, and
+.I index.dir
+alone is 134 MB before a single record is written.
+.PP
+A single line may be up to 262,144 bytes.  A longer one is
+.B dropped
+\(em not indexed, and not fatal, because one malformed record in a four
+billion line source must not end a multi-hour build.  Dropped lines are
+counted and the total is printed per source file, which matters: a word that
+was skipped cannot be told at lookup time from one the index never held, so
+the count is the only evidence it happened.  The decoded form of a
+.BI $HEX[ ... ]
+line is capped at half that, 131,136 bytes, which is what a line of full
+length denotes.  A
+.BI $TESTVEC[ HH " x " N ]
+expands independently of the length of the line that writes it, so it does
+not share that buffer: it expands into its own, capped at 2,097,152 bytes,
+the same limit
+.BR mdxfind (1)
+and
+.BR hashpipe (1)
+apply, and the buffer is allocated once per worker and only if a vector is
+actually met.  A vector over that limit is refused rather than truncated,
+because a shortened vector hashes to a well-formed digest for a word that
+was never presented.
+.PP
+Expect
+.I index.rec
+to be
+.I larger
+than the wordlists it indexes.  A record is 15 bytes whatever the word
+costs, and one source line leaves about 3.6 of them once duplicate keys are
+dropped \(em six types, and up to three NTLM readings of a non-ASCII word
+\(em so a line averaging 13 bytes of text occupies some 55 bytes of index.
+These three sources total 53.6 GB and their index is 226 GB.  The ratio is a
+property of the wordlist rather than of the index: it falls as the average
+line gets longer, and
+.B \-H
+with fewer types lowers it proportionally.
+.PP
+The database is worth excluding from backups \(em it is large and entirely
+derived.  On macOS:
+.PP
+.RS
+.nf
+asroot tmutil addexclusion \-p /usr/local/share/mdfind
+touch /usr/local/share/mdfind/.metadata_never_index
+.fi
+.RE
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success, including a lookup that found nothing.  An absent hash is an answer,
+not an error.
+.TP
+.B 1
+Fatal: a source file is missing or has been rewritten, the database is
+unreadable or of the wrong version, or an argument is wrong.
+.TP
+.B 2
+At least one candidate failed its re-hash check, or
+.B check
+found a bucket out of order or a duplicate key.  The index no longer matches
+a source file, or no longer matches itself; rebuild.
+.SH EXAMPLES
+Build over three files, highest-priority first:
+.PP
+.RS
+.nf
+$ mdindex \-v build hashmob.found hibp.pass solved.words
+.fi
+.RE
+.PP
+Look a word up.  No command word is needed, and the count and timing go to
+standard error:
+.PP
+.RS
+.nf
+$ printf password | md5 | mdindex
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+1 hit for 1 of 1 hashes, lookup time 0.000s, 0.000126s per hash
+.fi
+.RE
+.PP
+Half an MD5 is enough, and the full digest comes back:
+.PP
+.RS
+.nf
+$ mdindex 5f4dcc3b5aa765d6
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+.fi
+.RE
+.PP
+Six characters match across every indexed type:
+.PP
+.RS
+.nf
+$ mdindex 5f4dcc
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+MD5x02 5f4dcc93ef0450ccf4627a4fd62464b5:4hqgms*
+NTLMx01 5f4dcceae810ddf7f9115b012e5020af:chevyhemi2
+NTLMx01 5f4dcc5ea2cbee4d41a4fff4374c491f:Bluebaby7
+13 hits for 1 of 1 hashes
+.fi
+.RE
+.PP
+A whole hash file, with the phase breakdown:
+.PP
+.RS
+.nf
+$ mdindex \-v < hashes.txt > recovered.txt
+2,000 hits for 2,000 of 2,000 hashes, lookup time 18.472s, 0.009236s per hash (108.27 lookups/sec)
+  sort              0.000s  2,000  5.57M/s
+  index probe      18.108s  2,000  110.45/s
+  fetch+verify      0.363s  2,000  5.51K/s
+  regenerated               12,000 hash computations
+.fi
+.RE
+.PP
+The probe is the whole cost.  Each one is a random read of a 226 GB file and
+runs at the speed of the device, not of the CPU; the fetches that follow are
+cheap because the candidate locators are sorted before any line is read.
+Past the batch size given under
+.B lookup
+the probes are replaced by one sequential pass and the line reads
+.I index scan
+instead.
+.PP
+Check the overlay after an update, which is the only part an update can have
+changed:
+.PP
+.RS
+.nf
+$ mdindex check overlay
+/usr/local/share/mdfind/add.rec: 920 records, 0 out of order, 0 duplicate keys
+.fi
+.RE
+.PP
+Fold the overlay back into the index.  This rewrites
+.I index.rec
+in full and is never required for correctness:
+.PP
+.RS
+.nf
+$ mdindex \-v compact
+.fi
+.RE
+.PP
+Pick up lines appended to a source, and add a new wordlist at the lowest
+priority:
+.PP
+.RS
+.nf
+$ mdindex update
+$ mdindex update /path/to/newlist.txt
+.fi
+.RE
+.PP
+Resolve what a run failed to solve.
+.BR mdsplit (1)
+leaves the unsolved hashes in
+.IR hashes.txt.left :
+.PP
+.RS
+.nf
+$ mdindex < hashes.txt.left | hashpipe
+.fi
+.RE
+.SH "SEE ALSO"
+.BR mdxfind (1),
+.BR hashpipe (1),
+.BR mdsplit (1),
+.BR rehex (1),
+.BR rling (1),
+.BR md5 (1)
+.SH AUTHOR
+Waffle.
