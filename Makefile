@@ -62,22 +62,49 @@ ifneq ($(UNAME_S),Darwin)
   OSOPT += -fgnu89-inline
 endif
 
-CFLAGS  = -fomit-frame-pointer -pthread -O3 $(ARCHOPT) $(OSOPT) $(INCEXTRA) -I.
+CFLAGS  = -fomit-frame-pointer -pthread -O3 $(ARCHOPT) $(OSOPT) $(INCEXTRA) \
+          -I. -I$(LIBDIR)
 LDFLAGS = -pthread -O3
 
 # Static is PREFERRED, not required: an archive staged in the tree first,
 # then one in the system library directories, then the ordinary -l form.
 # That makes a clean clone link while keeping the release build static.
+# LIBDIR: where the static archives live, if not here.
+#
+# `make deps` is for a clean clone and builds them in this directory. A
+# build HOST that already carries them -- every machine in the release
+# fleet has them in ~/src/mdfind, shared with mdxfind -- should reuse
+# those rather than spend ten minutes rebuilding what is already there:
+#
+#	mkdir ~/src/mdfind/mdindex-build && cd $_
+#	make LIBDIR=.. mdindex
+#
+# Nothing is written outside this directory either way.
+LIBDIR ?= .
+
 pick_lib = $(firstword $(wildcard $(addsuffix /$(1),$(LIBSEARCH))) -l$(2))
 
 COMPRESS = $(call pick_lib,libz.a,z)
 
-LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
-       gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a \
-       argon2/argon2.a lm/lm.a $(COMPRESS)
+# lm.a sits at the top of a build host's tree and under lm/ in a clean
+# clone; take whichever is there before building one.
+LM := $(firstword $(wildcard $(LIBDIR)/lm.a $(LIBDIR)/lm/lm.a) lm/lm.a)
 
-YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
-                yescrypt/sha256.o yescrypt/insecure_memzero.o
+# gost2012.a likewise: deps installs it under gosthash/gost2012/, a build
+# host carries it at gosthash/ as well.
+GOST := $(firstword $(wildcard $(LIBDIR)/gosthash/gost2012/gost2012.a \
+                               $(LIBDIR)/gosthash/gost2012.a) \
+                    gosthash/gost2012/gost2012.a)
+
+LIBS = $(LIBDIR)/libssl.a $(LIBDIR)/libcrypto.a $(LIBDIR)/libsph.a \
+       $(LIBDIR)/libmhash.a $(LIBDIR)/librhash.a $(LIBDIR)/md6.a \
+       $(GOST) $(LIBDIR)/bcrypt-master/bcrypt.a \
+       $(LIBDIR)/argon2/argon2.a $(LM) $(COMPRESS)
+
+YESCRYPT_OBJS = $(LIBDIR)/yescrypt/yescrypt-common.o \
+                $(LIBDIR)/yescrypt/yescrypt-opt.o \
+                $(LIBDIR)/yescrypt/sha256.o \
+                $(LIBDIR)/yescrypt/insecure_memzero.o
 
 # hx: the expression language mdindex compiles every non-native type from.
 # hx_func is built in its STANDALONE flavour -- mdindex has no Hashtypes[]
@@ -136,6 +163,14 @@ sqlite3.c sqlite3.h:
 	@echo "$@ is not here yet. Run 'make deps' once (or just 'make dep-sqlite')." >&2
 	@exit 1
 
+# Same courtesy for the headers `make deps` installs. Without these, a tree
+# whose deps step failed reports "No rule to make target 'md6.h'", which
+# says nothing about what went wrong or what to do.
+md6.h mhash.h rhash.h:
+	@echo "$@ is missing: 'make deps' has not completed here." >&2
+	@echo "Run 'make deps' and read its output -- do not discard it." >&2
+	@exit 1
+
 hx_lib.o: hx.c hx_ast.h hx_vm.h hx.tab.h
 	$(CC) $(CFLAGS) -c hx.c -o hx_lib.o
 
@@ -163,7 +198,7 @@ ruleproc32.o: ruleproc32.c ruleproc32.h rule_ops.h latin_case.h combining.h
 classify_utf8.o: classify_utf8.c classify_utf8.h
 	$(CC) $(CFLAGS) -std=gnu99 -c classify_utf8.c
 
-mdindex: $(OBJS) argon2/argon2.a lm/lm.a
+mdindex: $(OBJS) $(LM)
 	$(CC) $(LDFLAGS) -o mdindex $(OBJS) $(YESCRYPT_OBJS) $(LIBS) $(LDEXTRA)
 
 # lm.a, the LAN Manager hash.  LGPL, Christopher R. Hertel -- see lm/ for
@@ -240,6 +275,7 @@ dep-openssl:
 	@if [ -f $(TOPDIR)/libssl.a ] && [ -f $(TOPDIR)/libcrypto.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/openssl; \
 	git clone --depth 1 --branch $(OPENSSL_TAG) $(OPENSSL_REPO) $(DEPDIR)/openssl; \
 	GOT=$$(cd $(DEPDIR)/openssl && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(OPENSSL_COMMIT)" ]; then \
@@ -261,6 +297,7 @@ dep-sphlib:
 	@if [ -f $(TOPDIR)/libsph.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/sphlib; \
 	git clone $(SPHLIB_REPO) $(DEPDIR)/sphlib; \
 	GOT=$$(cd $(DEPDIR)/sphlib && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(SPHLIB_COMMIT)" ]; then \
@@ -282,6 +319,7 @@ dep-mhash:
 	@if [ -f $(TOPDIR)/libmhash.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/mhash; \
 	git clone --branch $(MHASH_BRANCH) $(MHASH_REPO) $(DEPDIR)/mhash; \
 	GOT=$$(cd $(DEPDIR)/mhash && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(MHASH_COMMIT)" ]; then \
@@ -304,6 +342,7 @@ dep-rhash:
 	@if [ -f $(TOPDIR)/librhash.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/rhash; \
 	git clone --depth 1 --branch $(RHASH_TAG) $(RHASH_REPO) $(DEPDIR)/rhash; \
 	GOT=$$(cd $(DEPDIR)/rhash && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(RHASH_COMMIT)" ]; then \
@@ -325,6 +364,7 @@ dep-md6:
 	@if [ -f $(TOPDIR)/md6.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/retter; \
 	git clone $(MD6_REPO) $(DEPDIR)/retter; \
 	GOT=$$(cd $(DEPDIR)/retter && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(MD6_COMMIT)" ]; then \
@@ -343,6 +383,7 @@ dep-streebog:
 	@if [ -f $(TOPDIR)/gosthash/gost2012/gost2012.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/brutus; \
 	git clone $(STREEBOG_REPO) $(DEPDIR)/brutus; \
 	GOT=$$(cd $(DEPDIR)/brutus && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(STREEBOG_COMMIT)" ]; then \
@@ -364,6 +405,7 @@ dep-bcrypt:
 	@if [ -f $(TOPDIR)/bcrypt-master/bcrypt.a ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/crypt_blowfish; \
 	git clone --depth 1 --branch $(BCRYPT_TAG) $(BCRYPT_REPO) $(DEPDIR)/crypt_blowfish; \
 	GOT=$$(cd $(DEPDIR)/crypt_blowfish && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(BCRYPT_COMMIT)" ]; then \
@@ -383,6 +425,7 @@ dep-yescrypt:
 	@if [ -f $(TOPDIR)/yescrypt/yescrypt-opt.o ]; then echo "  already built, skipping"; exit 0; fi; \
 	set -e; \
 	mkdir -p $(DEPDIR); \
+	rm -rf $(DEPDIR)/yescrypt; \
 	git clone --depth 1 --branch $(YESCRYPT_TAG) $(YESCRYPT_REPO) $(DEPDIR)/yescrypt; \
 	GOT=$$(cd $(DEPDIR)/yescrypt && git rev-parse HEAD); \
 	if [ "$$GOT" != "$(YESCRYPT_COMMIT)" ]; then \
