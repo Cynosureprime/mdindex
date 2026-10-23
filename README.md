@@ -254,10 +254,16 @@ buckets and, inside them, a contiguous run of records:
 The last two lines are why a very short query is accepted only as an argument
 or from a terminal: each candidate costs a seek into a source file, so one
 stray one-character line in a piped list asks for more reads than the rest of
-the list together, and the run looks like a hang. From a pipe, a line that is
-not hex, or is shorter than the shortest digest in the database, is skipped
-without comment and counted — a mixed file carrying salts, plaintexts or blank
-lines can be fed in as it stands.
+the list together, and the run looks like a hang. From a pipe, mdindex does not
+require the line to *be* a hash: it takes the **first run of hex at least 16
+characters long** and reads it to the first non-hex byte, which is how mdxfind
+reads its hex, so no separator can fall inside the run. A shorter run is
+stepped over rather than failing the line — that is what lets a login through,
+since the `a` of `alice:` is a run of one and the digest after the colon is the
+first run long enough to be a digest. A line with no qualifying run at all, or
+whose first run is longer than the longest digest the database holds, is
+skipped without comment and counted — a mixed file carrying salts, plaintexts,
+logins or blank lines can be fed in as it stands.
 
 Every match is printed, with the full digest rather than the fragment you
 asked with. A short query against a multi-type index therefore returns hits of
@@ -513,20 +519,30 @@ found, so a line labelled `$dynamic_60$` carrying an MD5 is answered
 with several true names returns all of them here, exactly as it does for a
 bare hash.
 
-The digest begins after the second `$` in every such form, whatever precedes
-the first, so that is where mdindex resumes — and only when the lead-in was
-the reason the line did not parse, so a line that already read as a digest is
-never re-read as something else.
+No rule about John is needed for this: `$dynamic_60$` is not hex, so the
+first run of 16 or more begins where the digest begins, and a login in front
+of it is stepped over the same way. One rule reads all three forms.
 
-A **trailing** field is left attached on purpose. In a John line it is the
-salt, and a salted digest is not something this index holds; leaving it makes
-the line fail the hex test and be **counted among the ignored**, rather than
-looked up as though it were unsalted and reported as an ordinary miss:
+A **trailing** field no longer keeps the line out. Until 1.35 it did — the
+salt stayed attached, the line failed the hex test, and it was counted among
+the ignored. The run now stops at the `$` before the salt, so the digest is
+found and looked up **as though it were unsalted**, which for a salted hash is
+a question nobody asked, answered as an ordinary hit or miss:
 
 ```
 $ printf '$dynamic_1$5f4dcc3b5aa765d61d8327deb882cf99$SALT\n' | mdindex
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+1 hit for 1 of 1 hashes
+```
+
+That is the price of reading a noisy list at all, and every `hash:salt` line
+in such a list already pays it. A line with no hex run of 16 or more is still
+skipped and counted, and the count names the test that was actually made:
+
+```
+$ printf 'ETL:\n' | mdindex
 0 hits for 0 of 0 hashes
-1 input line ignored: not 16 to 128 hex characters
+1 input line ignored: no run of 16 to 128 hex characters
 ```
 
 ## Encoding wrappers

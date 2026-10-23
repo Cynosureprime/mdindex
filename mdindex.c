@@ -106,8 +106,14 @@
  * went to v3, and called all 16,777,216 buckets unsorted on a good index.
  *
  *
- * $Revision: 1.34 $
+ * $Revision: 1.36 $
  * $Log: mdindex.c,v $
+ * Revision 1.36  2026/10/21 20:08:44  dlr
+ * Define getentropy locally so a build from the 2.27 host runs on the 2.19 hosts. OpenSSL 1.1.1s CSPRNG carries a WEAK undefined getentropy and glibc supplies it only from 2.25, so an unresolved one survives the link as a versioned import and the loader on an older host refuses the binary whole: gp, gp1 and gp2 are EGLIBC 2.19 and reported version GLIBC_2.25 not found before main ran, on a binary that had built and selftested clean on the build host. mdxfind never showed this although it is built on the same host against the same libcrypto.a, because mymd5.c has carried the same shim for months and mdxfind links mymd5.o. mdindex does not, and mymd5.o cannot be added to this link: its procsaltbb references checkhashbb and NoMarkSalt, both mdxfind internals, and the link fails. So the definition is repeated here rather than shared, guarded away from macOS and Windows which have their own mechanisms. mymd5.c pairs it with explicit_bzero for argon2s secure wipe and nothing in this link references that one, so it is not repeated and the comment records where its twin would go. Measured on the build host: the symbol goes from w DF UND GLIBC_2.25 to g DF .text Base, the binarys highest glibc requirement drops from 2.25 to 2.17 which is exactly where mdxfind sits, and selftest passes on the build host and on all three 2.19 hosts, where the previous build would not start at all. The alternative tried first was a -static link, which worked but treated a one-symbol gap with a whole-binary change. No behaviour change on macOS or Windows, where the preprocessor removes the block.
+ *
+ * Revision 1.35  2026/10/21 16:07:32  dlr
+ * Find the hash in a noisy line instead of demanding the whole token be one. The stdin filter required the first whitespace-delimited token to be entirely hex and MINQHEX to the longest loaded digest long, which is true of almost nothing in somebody else's list: a 63,042-line hashmob unsolved file is hash colon salt on every line and read as 63,042 lines ignored, 0 of 0 hashes, no hits. That is the worst shape a diagnostic can have, because a wholly-skipped input is indistinguishable from an index with nothing in it. New first_hex_run finds the FIRST maximal run of ASCII hex at least MINQHEX long and extends it to the first non-hex byte, which is how mdxfind reads its hex, so no separator can be inside the run. A run SHORTER than the minimum is stepped over rather than failing the line, and that is what lets a login through: the a of alice colon is a hex run of length one and the digest after the colon is the first run long enough to be a digest. Interior whitespace is no longer cut either, only the line ending, so a digest in a later column is found; cutting at the first space is what used to hide it. A run longer than the longest digest the open index holds is counted as ignored rather than TRUNCATED to fit, because a truncated run is a query nobody asked for and at fifteen billion records it would occasionally match and be reported as a hit. Deliberately literal about first, too: scanning on to a later shorter run after rejecting an over-long one would make which field gets looked up depend on the index contents rather than on the line. Measured on the file that prompted this: 62,964 of 63,042 lines now parse against 0 before, 1,983 hits over 1,026 distinct hashes in 123 seconds at 511 lookups per second. The 78 ignored are accounted for exactly: 77 lines have no hex run of 16 or more at all, ETL colon being one, and one line leads with a 128-character run which this index cannot answer for since its longest digest is 64. Checked rather than assumed that the repeated output lines are input multiplicity and not double emission: the input holds 56,587 distinct hashes across 62,964 parsed lines, one hash appears 5 times and the output repeats each hit exactly as often as the input asks for it, which is the existing contract that lines printed and hashes answered are two numbers. The diagnostic said not 16 to 64 hex characters, which named a test the program no longer makes, and now says no run of 16 to 64 hex characters. skip_leadin is left in place and now serves the ARGUMENT path only, where a partial query typed by hand is deliberate and runs at any length. Its stdin consequence has changed and the comment says so: a salted dollar dynamic_1 line used to keep its trailing salt, fail the hex test and be COUNTED as ignored, and now its digest is found and looked up as if unsalted, so it reads as an ordinary miss. That is the price of reading a noisy list at all and it is the same trade every hash colon salt line in such a list already makes. Seven selftest checks cover the run extraction, including the one case where the first long run is NOT the hash: a phpass MCF in field one is not hex, so field two is what gets looked up, 4 lines in the 63,042-line sample. The terminal path is untouched and still takes one typed token. selftest passes.
+ *
  * Revision 1.34  2026/10/20 17:21:08  dlr
  * Three reproduced traps: a lost word, a raw plaintext, and a stale overlay. Reported against 1.32 by Waffle, all three reproduced here before being touched. FIRST, a word was lost whenever an update met a source whose last line had no terminator. consumed was set to the file SIZE, which asserts that the final partial line is finished, so the next update began in the middle of a word: a file ending bet, with a-newline-gamma-newline appended, indexed bet and then a and never beta. Two words were unreachable, not one -- bet had a record too, naming an offset that now reads beta and fails its re-hash. consumed_to now stops at the byte after the last newline, so an unterminated tail is re-read until it is terminated, which costs a few re-hashed lines that dedup drops. The tail is still INDEXED at build, so a file that simply ends without a newline keeps its last word. The fingerprint had to move with it: it was taken over size while files_check recomputes over consumed, and the mismatch made every source read as rewritten. SECOND, plaintexts were printed raw. needs_hex was correct and matched mdxfinds own dohex rule, but emit_hit never reached it: every type sets verbatim, and that branch printed the source line and returned. A colon made the line ambiguous, a high byte went out unwrapped, and a NUL TRUNCATED the plaintext -- printf stops at a NUL whatever precision it is given -- so the line claimed a word that does not produce its hash. All output now goes through emit_line, which writes with fwrite rather than a precision conversion and wraps on mdxfinds rule: any byte below 0x20 or above 0x7e, or a colon. The verbatim path applies only the BYTE test, never the wrapper-prefix test, because an already-wrapped line is plain ASCII and re-wrapping would double it. THIRD, a build left the previous overlay in place. add.rec describes words at locators in the OLD sources; at best its records are rejected one at a time, and at worst its locator names a source the new manifest does not have, which is fatal at the first lookup -- FATAL record names file index 1 of 1, on a database build had just reported as finished. check calls such an overlay clean, because every record in it is well formed; what is wrong is that it belongs to a database that no longer exists. build now unlinks it. Verified: beta resolves and so do its neighbours, a file ending without a newline keeps its last word, a colon, a high byte and an embedded NUL all emit as $HEX[] and pass hashpipe -c, a rebuild after an update leaves no overlay and no FATAL, selftest passes, and both live databases read and check unchanged.
  *
@@ -481,6 +487,35 @@ extern int mdindex_bridges_register(void);
 #include <sys/statvfs.h>
 #endif
 
+/* OpenSSL 1.1.1's CSPRNG carries a WEAK undefined getentropy, which glibc
+ * supplies only from 2.25.  Left unresolved it survives the link as a
+ * versioned import and the loader on an older host refuses the binary
+ * whole: gp, gp1 and gp2 are EGLIBC 2.19 and report "version `GLIBC_2.25'
+ * not found" before main() runs, on a binary that built and selftested
+ * clean on the build host.  A local definition binds the weak reference at
+ * link time and the import never appears, which is why mdxfind -- built on
+ * the same host against the same libcrypto.a -- tops out at GLIBC_2.17.
+ * mdxfind gets this from mymd5.c, and mdindex cannot: mymd5.o's procsaltbb
+ * references checkhashbb and NoMarkSalt, both mdxfind internals, so linking
+ * it here fails.  Repeated rather than shared for that reason.  mymd5.c
+ * pairs it with explicit_bzero for argon2's secure wipe; nothing in this
+ * link references that one, so it is not repeated -- if argon2 ever pulls
+ * it in, this is where its twin goes.  macOS and Windows have their own
+ * mechanisms and are excluded. */
+#if !defined(__APPLE__) && !defined(_WIN32)
+int getentropy(void *buf, size_t buflen)
+{
+    int     fd = open("/dev/urandom", O_RDONLY);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, buf, buflen);
+    close(fd);
+    return (n == (ssize_t)buflen) ? 0 : -1;
+}
+#endif
+
 /* Windows opens in TEXT mode by default, which translates CRLF on read and
  * stops at 0x1A. Every file mdindex touches is binary -- the index, the
  * partitions, and a wordlist that may hold any byte -- so every open() here
@@ -497,7 +532,7 @@ extern int mdindex_bridges_register(void);
 #define DEVNULL "/dev/null"
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.34 2026/10/20 17:21:08 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.36 2026/10/21 20:08:44 dlr Exp dlr $";
 static const char *Prog = "mdindex";
 
 extern void qsort_mt(void *a, size_t n, size_t es,
@@ -4318,6 +4353,50 @@ static int all_hex(const char *s, size_t n)
     return 1;
 }
 
+/* Find the first maximal run of ASCII hex digits at least `lo` long, and
+ * report where it starts and how long it is.
+ *
+ * This is what makes a NOISY file usable.  The input to this program is
+ * normally somebody else's list, and the digest is rarely the whole line:
+ * it arrives as `hash:salt`, as `user:hash`, as `$dynamic_0$hash`, or in
+ * some column further along.  Requiring the whole token to be hex rejected
+ * every one of those, and a 63,042-line list read as 63,042 lines ignored
+ * and no hits -- a wholly-skipped input that looks exactly like an index
+ * with nothing in it.
+ *
+ * A run SHORTER than `lo` is stepped over rather than failing the line,
+ * which is what lets a login through: the `a` of `alice:` is a hex run of
+ * length 1, and the digest after the colon is the first run long enough to
+ * be one.  The run then extends to the first non-hex byte, as mdxfind reads
+ * its hex, so no separator can end up inside it.
+ *
+ * `lo` is the shortest query worth making and the caller's `hi` the longest
+ * digest the open index actually holds.  A run longer than `hi` is not a
+ * digest this index can answer for, and the line is counted as ignored
+ * rather than TRUNCATED to fit: a truncated run is a query nobody asked
+ * for, and at these volumes it would occasionally match something and be
+ * reported as a hit.  Deliberately literal about "first", too -- scanning
+ * on to a later, shorter run after rejecting an over-long one would make
+ * which field gets looked up depend on the index's contents.
+ *
+ * Returns NULL when the line has no such run. */
+static char *first_hex_run(char *s, int lo, int *lenp)
+{
+    char *p = s;
+
+    while (*p != 0) {
+        char *b;
+        int   n;
+
+        if (hexval((unsigned char)*p) < 0) { p++; continue; }
+        b = p;
+        while (hexval((unsigned char)*p) >= 0) p++;
+        n = (int)(p - b);
+        if (n >= lo) { *lenp = n; return b; }
+    }
+    return NULL;
+}
+
 /* A John line carries its format in front of the digest, and some carry a
  * login in front of that:
  *
@@ -4395,28 +4474,30 @@ static void cmd_lookup(int argc, char **argv)
         q = xmalloc(sizeof(*q) * cap);
         while (fgets(line, sizeof(line), stdin) != NULL) {
             char *p = line + strspn(line, " \t");
-            p[strcspn(p, " \t\r\n")] = 0;
-            if (*p == 0) continue;
+
+            /* Only the line ending is cut.  Interior whitespace STAYS,
+             * because the digest may be in a later column and cutting at
+             * the first space would hide it. */
+            p[strcspn(p, "\r\n")] = 0;
             /* Not a hash: skip it without a word.  Feeding a mixed file
              * in is the normal way to use this, so a per-line complaint
              * would bury the answers.  The count is reported at the end
              * -- silence about a wholly-skipped input is how a pipeline
              * with the wrong column reads as "no hits". */
             if (lo) {
-                int len = (int)strlen(p);
-                if (len < lo || len > hi || !all_hex(p, (size_t)len)) {
-                    /* Only reinterpreted when the lead-in was the reason
-                     * it did not parse, so a line that already read as a
-                     * digest is never re-read as something else. */
-                    char *j  = skip_leadin(p);
-                    int   jl = (int)strlen(j);
-                    if (j == p || jl < lo || jl > hi ||
-                        !all_hex(j, (size_t)jl)) {
-                        Nskip++;
-                        continue;
-                    }
-                    p = j;
+                int   n = 0;
+                char *h = first_hex_run(p, lo, &n);
+
+                if (h == NULL || n > hi) {
+                    if (*p != 0) Nskip++;   /* a blank line is not "ignored" */
+                    continue;
                 }
+                h[n] = 0;                   /* overwrite the byte that ended it */
+                p = h;
+            } else {
+                /* A terminal gets what was typed, one token. */
+                p[strcspn(p, " \t")] = 0;
+                if (*p == 0) continue;
             }
             if (nq == cap) {
                 cap = cap * 2 < blk ? cap * 2 : blk;
@@ -4454,8 +4535,8 @@ static void cmd_lookup(int argc, char **argv)
         if (Nskip) {
             int lo, hi;
             hexlen_range(&lo, &hi);
-            fprintf(stderr, "%s input line%s ignored: not %d to %d hex "
-                    "characters\n", commify(Nskip), Nskip == 1 ? "" : "s",
+            fprintf(stderr, "%s input line%s ignored: no run of %d to %d "
+                    "hex characters\n", commify(Nskip), Nskip == 1 ? "" : "s",
                     lo, hi);
         }
         if (Nstale)
@@ -5565,6 +5646,45 @@ static void cmd_selftest(void)
         }
     }
 
+    printf("\nhex-run extraction:\n");
+    {
+        int   n;
+        char *h;
+        char c1[] = "2055d9ef479bf00a61ae9a3ab2246213:b780915efdb2c702f8d29026eefb5a74";
+        char c2[] = "alice:d0763edaa9d9bd2a9516280e9044d885";
+        char c3[] = "$dynamic_0$d0763edaa9d9bd2a9516280e9044d885";
+        char c4[] = "word\td0763EDAA9D9BD2A9516280E9044D885  trailing";
+        char c5[] = "ETL:";
+        char c6[] = "deadbeef";
+        char c7[] = "$P$BOWLBZV02p4JeBXQXkqRc75yklWPQU1:cf768fd736bf7233deb44db1eea06019";
+
+        n = 0; h = first_hex_run(c1, 16, &n);
+        ck(h == c1 && n == 32,
+           "hash:salt yields the hash, the run stopping at the colon");
+        n = 0; h = first_hex_run(c2, 16, &n);
+        ck(h == c2 + 6 && n == 32,
+           "a login is stepped over, its own hex runs being too short");
+        n = 0; h = first_hex_run(c3, 16, &n);
+        ck(h == c3 + 11 && n == 32,
+           "a $dynamic_N$ lead-in is stepped over");
+        n = 0; h = first_hex_run(c4, 16, &n);
+        ck(h == c4 + 5 && n == 32,
+           "a digest in a later column is found, upper case included");
+        n = 0;
+        ck(first_hex_run(c5, 16, &n) == NULL,
+           "a line with no run that long is refused");
+        n = 0;
+        ck(first_hex_run(c6, 16, &n) == NULL,
+           "a run shorter than the minimum is refused, not padded");
+        /* Stated as a check because it is the one case where the first long
+         * run is NOT the hash: field 1 is a phpass MCF, which this index
+         * cannot hold anyway, so field 2 is what gets looked up.  4 lines in
+         * a 63,042-line sample. */
+        n = 0; h = first_hex_run(c7, 16, &n);
+        ck(h == c7 + 35 && n == 32,
+           "a non-hex MCF in field 1 yields field 2 -- known consequence");
+    }
+
     printf("\nquery lead-in:\n");
     {
         char b1[] = "$dynamic_0$d0763edaa9d9bd2a9516280e9044d885";
@@ -5578,12 +5698,16 @@ static void cmd_selftest(void)
            "a login in front of the lead-in is skipped with it");
         ck(skip_leadin(b3) == b3,
            "a bare digest is returned untouched");
-        /* The trailing field is the salt, and a salted digest is not in
-         * this index.  Leaving it attached is what makes the line fail
-         * the hex test and be COUNTED as ignored, rather than looked up
-         * as if it were unsalted and reported as a plain miss. */
+        /* skip_leadin now serves the ARGUMENT path only; the stdin path
+         * scans for a hex run instead.  It still leaves a trailing field
+         * attached, which is what this checks -- but note the consequence
+         * has changed for stdin: a salted $dynamic_1$ line used to be
+         * counted as ignored, and now its digest is found and looked up as
+         * if unsalted, so it reads as an ordinary miss.  That is the price
+         * of reading a noisy list at all, and it is the same trade every
+         * `hash:salt` line in such a list already makes. */
         ck(!all_hex(skip_leadin(b4), strlen(skip_leadin(b4))),
-           "a trailing $salt is left on, so the line is ignored not missed");
+           "a trailing $salt is left on by skip_leadin (argument path)");
     }
 
     printf("\nwrapper decoding:\n");

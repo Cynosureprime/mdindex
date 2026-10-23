@@ -331,14 +331,21 @@ hashes are read from standard input, one per line, case-insensitive hex.
 Nothing is printed for a hash that is absent.  Counts and timings go to standard error, so standard output carries
 solutions or nothing and is safe to pipe.
 .IP
-From a pipe or a file, a line that is not hex, or whose length is outside the
-range of digest sizes this database holds, is skipped without a word and only
-counted \(em the total is printed after the summary.  A mixed file carrying
-salts, plaintexts or blank lines can therefore be fed in as it stands.  Note
-what this excludes: a short
+From a pipe or a file,
+.B mdindex
+does not require the line to be a hash: it takes the first run of hex at least
+16 characters long and reads it to the first non-hex byte, which is how
+.B mdxfind
+reads its hex, so no separator can fall inside the run.  A shorter run is
+stepped over rather than failing the line, so a login in front of the digest is
+no obstacle, and a short
 .I hex
-fragment, which from a pipe is almost always a plaintext that happens to look
-like hex rather than a query anyone meant.
+fragment \(em which from a pipe is almost always a plaintext that happens to
+look like hex rather than a query anyone meant \(em is passed over rather than
+looked up.  A line with no qualifying run at all, or whose first run is longer
+than the longest digest this database holds, is skipped without a word and only
+counted \(em the total is printed after the summary.  A mixed file carrying
+salts, plaintexts, logins or blank lines can therefore be fed in as it stands.
 .IP
 A hash given as an argument, or typed at a terminal, is taken exactly as
 asked, however short, and a malformed one is named on standard error.  That
@@ -378,20 +385,23 @@ alice:$dynamic_0$0cc175b9c0f1b6a831c399e269772661
 .fi
 .RE
 .PP
-The digest begins after the second
-.B $
-in every such form, whatever precedes the first, so that is where
-.B mdindex
-resumes.  It does so only when the lead-in was the reason the line did
-not parse, so a line that already read as a digest is never re-read as
-something else.
+No rule about John is needed for this.
+.B $dynamic_0$
+is not hex, so the first run of 16 or more begins where the digest begins,
+and a login in front of it is stepped over the same way; one rule reads all
+three forms.
 .PP
 A
 .I trailing
-field is left attached on purpose.  In a John line it is the salt, and a
-salted digest is not something this index holds; leaving it makes the
-line fail the hex test and be counted among the ignored, rather than
-looked up as though it were unsalted and reported as an ordinary miss.
+field no longer keeps the line out.  Until 1.35 it did \(em the salt stayed
+attached, the line failed the hex test, and it was counted among the ignored.
+The run now stops at the
+.B $
+before the salt, so the digest is found and looked up as though it were
+unsalted, and reported as an ordinary hit or miss.  That is the price of
+reading a noisy list at all, and every
+.I hash:salt
+line in such a list already pays it.
 .SS Digests narrower than the key
 A type whose digest is shorter than the 12-byte index key cannot be
 indexed and is refused, whether it is named explicitly or reached through
