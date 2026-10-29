@@ -292,7 +292,7 @@ static const struct hxcat Hxcat[] = {
     { 272, "RADMIN2SQL5-40", "md5(pad(upper(sha1(sha1_bin(pass))), 100))", 1, NULL, NULL, NULL, NULL, 0, "md5(pad(PREV))" },
     { 273, "RADMIN2BASE64", "md5(pad(base64(pass), 100))", 1, NULL, NULL, NULL, NULL, 0, "md5(pad(PREV))" },
     { 274, "RADMIN2SHA1MD5", "md5(pad(sha1(md5(pass)), 100))", 1, NULL, NULL, NULL, NULL, 0, "md5(pad(PREV))" },
-    { 275, "RADMIN2SQL3", "md5(pad(mysql3(pass), 100))", 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 275, "RADMIN2SQL3", "md5(pad(mysql3(pass), 100))", 1, NULL, NULL, NULL, NULL, 0, "md5(pad(PREV))" },
     { 276, "RADMIN2MD5MD5MD5", "md5(pad(md5(md5(md5(pass))), 100))", 1, NULL, NULL, NULL, NULL, 0, "md5(pad(PREV))" },
     { 277, "MD5RADMIN2MD5", "md5(md5(pad(md5(pass), 100)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 278, "MD51SALTMD5", NULL, 1, NULL, NULL, NULL, NULL, 0, NULL },
@@ -802,7 +802,7 @@ static const struct hxcat Hxcat[] = {
     { 784, "MD4UTF16MD5MD5PASSMD5SALT", "md4(utf16le(md5^2(pass) . md5(salt)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 785, "MD4UTF16MD5PASSMD5SHA1SALT", "md4(utf16le(md5(pass) . md5(cut(sha1(salt), 0, 32))))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 786, "NTLMH", "md4(utf16le(pass))", 1, NULL, NULL, NULL, NULL, 0, NULL },
-    { 787, "MD4UTF16SQL3", "md4(utf16le(mysql3(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 787, "MD4UTF16SQL3", "md4(utf16le(mysql3(pass)))", 1, NULL, NULL, NULL, NULL, 0, "md4(utf16le(PREV))" },
     { 788, "MD4UTF16BASE64", "md4(utf16le(base64(pass)))", 1, NULL, NULL, NULL, NULL, 0, "md4(utf16le(PREV))" },
     { 789, "MD4UTF16revBASE64x", "md4(utf16le(rev(base64(pass))))", 1, NULL, NULL, NULL, NULL, 0, "md4(utf16le(PREV))" },
     { 790, "SHA1BASE64SHA256", "sha1(base64(sha256(pass)))", 1, NULL, NULL, NULL, NULL, 0, NULL },
@@ -1077,6 +1077,7 @@ static const struct hxcat Hxcat[] = {
     { 1059, "BCRYPTMD5PASSSALT", "bcrypt(md5(pass . salt2), salt, cost)", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 1060, "MD5USERDESCRYPT", "md5(user . descrypt(pass, salt))", 1, NULL, NULL, NULL, NULL, 0, NULL },
     { 1061, "MD5CRYPTMD5", "md5crypt(md5(pass), salt)", 1, NULL, NULL, NULL, NULL, 0, NULL },
+    { 1062, "SHA256BASE64", "sha256(base64(pass))", 1, NULL, NULL, NULL, NULL, 0, NULL },
 };
 #define NHXCAT ((int)(sizeof(Hxcat) / sizeof(Hxcat[0])))
 

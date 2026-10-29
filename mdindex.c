@@ -106,8 +106,11 @@
  * went to v3, and called all 16,777,216 buckets unsorted on a good index.
  *
  *
- * $Revision: 1.36 $
+ * $Revision: 1.37 $
  * $Log: mdindex.c,v $
+ * Revision 1.37  2026/10/23 17:46:08  dlr
+ * sel_expand_iters: -i N now reaches every native arm, at depths mdxfind agrees with. A native arm only ever picked up a deeper round that Defsix literally carried, and Defsix carries exactly one (MD5x02), so -i silently did nothing for SHA1, SHA256, SQL5 and NTLM: "-H e10 -i 2" built SHA256x01 and no SHA256x02 while the hx types named in the same -H got theirs, and the gap reads as a clean 0-hit lookup. The depths the table cannot supply now come from the catalog expression, the same path the non-native types already take, which reproduces mdxfind for MD5, SHA1 and SHA256. Two arms do not fit that rule and are handled explicitly. NTLM (e369) does not iterate at all: JOB_NTLM calls checkhash(..., 1, job) with a literal 1 and has no Maxiter loop, so NTLMx02 is a digest mdxfind never computes; the guard sits ahead of the native/catalog split because -H all reached the same type by the other route and built md4(md4(utf16le(pass))), dropping the encoding the second round needs and labelling it NTLMx02. That digest already has a correct home in e496 MD4UTF16, which declares the step md4(utf16le(PREV)). SQL5 (e259) iterates but carries forward a value it does not report: it reports sha1(sha1_bin(cur)) while setting the next cur to prmd5UC of the INNER digest, uppercased, so the printed round cannot be fed back and the step mechanism cannot restructure its inside; the chain is unrolled instead as C(1)=pass, C(k)=upper(sha1(C(k-1))), reported sha1(sha1_bin(C(n))). The catalog is no help there either, holding MySQL display form. Verified against mdxfind -z for 4 words x depths 1-5 across all five native arms: 84 of 84 digests found under identical type names, all 84 re-verified by hashpipe, -H all unchanged but for NTLMx02, non-ASCII NTLM three-codepage variants intact, selftest passes
+ *
  * Revision 1.36  2026/10/21 20:08:44  dlr
  * Define getentropy locally so a build from the 2.27 host runs on the 2.19 hosts. OpenSSL 1.1.1s CSPRNG carries a WEAK undefined getentropy and glibc supplies it only from 2.25, so an unresolved one survives the link as a versioned import and the loader on an older host refuses the binary whole: gp, gp1 and gp2 are EGLIBC 2.19 and reported version GLIBC_2.25 not found before main ran, on a binary that had built and selftested clean on the build host. mdxfind never showed this although it is built on the same host against the same libcrypto.a, because mymd5.c has carried the same shim for months and mdxfind links mymd5.o. mdindex does not, and mymd5.o cannot be added to this link: its procsaltbb references checkhashbb and NoMarkSalt, both mdxfind internals, and the link fails. So the definition is repeated here rather than shared, guarded away from macOS and Windows which have their own mechanisms. mymd5.c pairs it with explicit_bzero for argon2s secure wipe and nothing in this link references that one, so it is not repeated and the comment records where its twin would go. Measured on the build host: the symbol goes from w DF UND GLIBC_2.25 to g DF .text Base, the binarys highest glibc requirement drops from 2.25 to 2.17 which is exactly where mdxfind sits, and selftest passes on the build host and on all three 2.19 hosts, where the previous build would not start at all. The alternative tried first was a -static link, which worked but treated a one-symbol gap with a whole-binary change. No behaviour change on macOS or Windows, where the preprocessor removes the block.
  *
@@ -532,7 +535,7 @@ int getentropy(void *buf, size_t buflen)
 #define DEVNULL "/dev/null"
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.36 2026/10/21 20:08:44 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.37 2026/10/23 17:46:08 dlr Exp dlr $";
 static const char *Prog = "mdindex";
 
 extern void qsort_mt(void *a, size_t n, size_t es,
@@ -1948,6 +1951,59 @@ static void sel_add_native(const struct htype *proto)
 
 static int Maxiter = 1;
 
+/* The native arms mdxfind does not iterate the generic way.  The generic
+ * rule -- re-hash the LOWERCASE hex of the previous digest -- is what
+ * expr_iterate() builds from a catalog expression, and it reproduces
+ * mdxfind exactly for MD5, SHA1 and SHA256.  The other two do not fit it:
+ *
+ *   NTLM (e369) does not iterate AT ALL.  mdxfind.c's JOB_NTLM arm calls
+ *   checkhash(&md5buf, 32, 1, job) with a literal 1 and carries no
+ *   `for (x = 1; x <= Maxiter; x++)` loop, so NTLMx02 is a digest mdxfind
+ *   never computes and hashpipe never verifies.  Generating one here would
+ *   put a hash in the index that nothing else in the suite agrees with,
+ *   which is worse than the gap it would fill.
+ *
+ *   SQL5 (e259) iterates, but the value it carries forward is NOT the one
+ *   it reports.  JOB_SQL5 reports sha1(sha1_bin(cur)) while setting the
+ *   next cur to prmd5UC(sha1_bin(cur)) -- the INNER digest, uppercased.
+ *   The reported hash is a further sha1 of that inner digest, so the
+ *   printed round cannot be fed back into anything, and expr_iterate's
+ *   step mechanism (which substitutes PREV for the whole previous
+ *   expression) cannot restructure its inside.  The chain is unrolled
+ *   explicitly below instead.  The catalog expression is no help either:
+ *   e259 holds MySQL's DISPLAY form, "*" . upper(...), which is not even a
+ *   digest -- mdindex indexes the bare sha1(sha1_bin(pass)) that mdxfind
+ *   prints, so the unrolled form has to start from that and not from the
+ *   catalog.
+ */
+#define JOB_E_SQL5 259
+#define JOB_E_NTLM 369
+
+/* SQL5 unrolled to depth n:  C(1) = pass,  C(k) = upper(sha1(C(k-1))),
+ * and the digest reported at depth n is sha1(sha1_bin(C(n))).  Checked
+ * against mdxfind -z for x01..x05. */
+static char *sql5_iter_expr(int n)
+{
+    char *inner = xstrdup("pass");
+    char *out;
+    int   k;
+
+    for (k = 1; k < n; k++) {
+        size_t ln = strlen(inner) + sizeof("upper(sha1())");
+        out = xmalloc(ln);
+        snprintf(out, ln, "upper(sha1(%s))", inner);
+        free(inner);
+        inner = out;
+    }
+    {
+        size_t ln = strlen(inner) + sizeof("sha1(sha1_bin())");
+        out = xmalloc(ln);
+        snprintf(out, ln, "sha1(sha1_bin(%s))", inner);
+    }
+    free(inner);
+    return out;
+}
+
 /* -i N: index iterations 1..N of every selected type.  Done after the
  * selection is complete so that -i and -H are order-independent, and so a
  * type that cannot be iterated is skipped rather than refused -- asking
@@ -1962,17 +2018,47 @@ static void sel_expand_iters(void)
         const struct hxcat *c;
         int first;
 
+        /* NTLM does not iterate -- see above.  The test sits HERE, ahead of
+         * the native/catalog split, because the two selection routes reach
+         * this loop differently: `-H e369` brings in the native arm, while
+         * `-H all` brings in the catalog entry, and neither may grow an
+         * x02.  Through the catalog it was doubly wrong -- the generic rule
+         * built md4(md4(utf16le(pass))), dropping the encoding the second
+         * round needs, and labelled it NTLMx02, which mdxfind never prints.
+         * The digest that form should have produced already has a correct
+         * home: e496 MD4UTF16 declares the step md4(utf16le(PREV)) and
+         * computes it right, and hashpipe verifies it under that name. */
+        if (Htype[i].job == JOB_E_NTLM) continue;
+
         if (Htype[i].fn != NULL) {
             /* A native arm is not iterated from an expression, but the
              * table may carry the deeper round itself -- MD5x02 is there
              * beside MD5x01 -- and -i should reach it. */
-            int d, k2;
+            int d, k2, njob = Htype[i].job;
+
             for (k2 = 2; k2 <= Maxiter; k2++)
                 for (d = 0; d < NDEFSIX; d++)
-                    if (Defsix[d].job == Htype[i].job &&
+                    if (Defsix[d].job == njob &&
                         Defsix[d].iters == k2)
                         sel_add_native(&Defsix[d]);
-            continue;
+
+            /* Defsix carries exactly ONE deeper round -- MD5x02 -- so
+             * until now every other native arm stopped right here and -i
+             * silently did nothing for it: `-H e10 -i 2` built SHA256x01
+             * and no SHA256x02, while the hx types named in the same -H
+             * got theirs.  The depths the table cannot supply come from
+             * the catalog expression instead, which is the same path the
+             * non-native types already take.  SQL5 cannot: */
+            if (njob == JOB_E_SQL5) {
+                for (k2 = 2; k2 <= Maxiter; k2++) {
+                    char *e = sql5_iter_expr(k2);
+                    sel_add_hx(JOB_E_SQL5, "SQL5", e, 1, k2, NULL, NULL,
+                               NULL, 0, NULL, 0);
+                    free(e);
+                }
+                continue;
+            }
+            /* MD5, SHA1, SHA256: the generic rule is right, fall through. */
         }
         if (Htype[i].enumdom) continue;             /* own loop, no MDstart */
         if (userdef_is_userop(Htype[i].job)) {

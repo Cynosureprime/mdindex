@@ -2,8 +2,8 @@
 #ifndef MDINDEX_TYPEOPTS_H
 #define MDINDEX_TYPEOPTS_H
 
-#define MDX_MAXJOB 1061
-#define MDX_NTYPEOPT 1061
+#define MDX_MAXJOB 1062
+#define MDX_NTYPEOPT 1062
 
 static const unsigned char Typeopt_flags[MDX_MAXJOB + 1] = {
     [1] = 2,
@@ -846,11 +846,11 @@ static const unsigned char Typeopt_flags[MDX_MAXJOB + 1] = {
     [838] = 38,
     [839] = 38,
     [840] = 38,
-    [841] = 38,
+    [841] = 2,
     [842] = 38,
     [843] = 38,
     [844] = 2,
-    [845] = 38,
+    [845] = 2,
     [846] = 38,
     [847] = 38,
     [848] = 38,
@@ -1067,6 +1067,7 @@ static const unsigned char Typeopt_flags[MDX_MAXJOB + 1] = {
     [1059] = 37,
     [1060] = 102,
     [1061] = 37,
+    [1062] = 2,
 };
 
 #endif
