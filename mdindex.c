@@ -106,8 +106,11 @@
  * went to v3, and called all 16,777,216 buckets unsorted on a good index.
  *
  *
- * $Revision: 1.37 $
+ * $Revision: 1.38 $
  * $Log: mdindex.c,v $
+ * Revision 1.38  2026/11/05 21:03:51  dlr
+ * Dedup on key and TYPE, with no read of a source line, and carry the type in every record. 1.24 made an equal key with differing locators read both source lines and let the text decide, so that two different words reaching one digest both survived. Its log called the reads rare by construction; they are not, because every word the sources share is an equal key at two locators, and the 2026-10-18 build dropped 9,891,671,853 of them. On the first full build since, a stack sample put 1,477 of 1,481 samples in emit_index, same_word, same_line, fetch_line: two random reads per overlap at about 130 a second on the Fusion HDD, and index.rec.new had reached 3.9 million of some 15 billion records after four and a half hours, so the build was stopped. Two different words reach one digest only through two different types (MD5x02 of password is MD5x01 of its own hex), while a same-type random collision in 96 bits is about 1e-9 over the whole index. So the record now carries the type, as its 2-byte position in the manifest type list, and the rule needs no read: an equal key under an equal type is the same word and the copy from the highest-priority file is kept, while an equal key under a different type is kept. Scratch records are key, type, locator, 20 bytes; stored records are residue, type, locator, 17 bytes; both sort key-major then type, so every copy of one word under one type is adjacent and one compare against the previous record decides it. The overlay check against the main index, the overlay merge and check use the same rule, so nothing in mdindex reads a line to deduplicate any more, and same_line and same_word are gone. The iteration count is not stored; it is derived when a hit is displayed. Manifest v5; a v3 or v4 database has the wrong record size and is refused with a rebuild message. Verified on the first 2,000,000 lines of hibp.pass indexed twice, so that every record is a cross-file duplicate: 1.37 took 183.1s to emit and 1.38 takes 2.2s. 1.37 kept 518,404 equal-key pairs and 1.38 keeps 329, and all 329 are MD5x01 of a 32-hex line beside MD5x02 of the word it is the hex of, the case the type exists for. The other 518,075 were one word stored both raw and as $HEX[], which 1.37 compared as raw text and kept twice. Lookup of 3,464 queries gives identical distinct answers from both databases, with 140 repeated lines from 1.37 and none from 1.38. check all is clean; update files 12 new records and recognises 12 as already indexed without a read; compact gives exactly the sum. Selftest 70 passed, with a new case requiring a digest reached by two words through two types to answer with both, confirmed to fail against a build that drops on the key alone.
+ *
  * Revision 1.37  2026/10/23 17:46:08  dlr
  * sel_expand_iters: -i N now reaches every native arm, at depths mdxfind agrees with. A native arm only ever picked up a deeper round that Defsix literally carried, and Defsix carries exactly one (MD5x02), so -i silently did nothing for SHA1, SHA256, SQL5 and NTLM: "-H e10 -i 2" built SHA256x01 and no SHA256x02 while the hx types named in the same -H got theirs, and the gap reads as a clean 0-hit lookup. The depths the table cannot supply now come from the catalog expression, the same path the non-native types already take, which reproduces mdxfind for MD5, SHA1 and SHA256. Two arms do not fit that rule and are handled explicitly. NTLM (e369) does not iterate at all: JOB_NTLM calls checkhash(..., 1, job) with a literal 1 and has no Maxiter loop, so NTLMx02 is a digest mdxfind never computes; the guard sits ahead of the native/catalog split because -H all reached the same type by the other route and built md4(md4(utf16le(pass))), dropping the encoding the second round needs and labelling it NTLMx02. That digest already has a correct home in e496 MD4UTF16, which declares the step md4(utf16le(PREV)). SQL5 (e259) iterates but carries forward a value it does not report: it reports sha1(sha1_bin(cur)) while setting the next cur to prmd5UC of the INNER digest, uppercased, so the printed round cannot be fed back and the step mechanism cannot restructure its inside; the chain is unrolled instead as C(1)=pass, C(k)=upper(sha1(C(k-1))), reported sha1(sha1_bin(C(n))). The catalog is no help there either, holding MySQL display form. Verified against mdxfind -z for 4 words x depths 1-5 across all five native arms: 84 of 84 digests found under identical type names, all 84 re-verified by hashpipe, -H all unchanged but for NTLMx02, non-ASCII NTLM three-codepage variants intact, selftest passes
  *
@@ -535,7 +538,7 @@ int getentropy(void *buf, size_t buflen)
 #define DEVNULL "/dev/null"
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.37 2026/10/23 17:46:08 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.38 2026/11/05 21:03:51 dlr Exp dlr $";
 static const char *Prog = "mdindex";
 
 extern void qsort_mt(void *a, size_t n, size_t es,
@@ -547,12 +550,20 @@ extern void qsort_mt(void *a, size_t n, size_t es,
 #define BUCKBITS        24
 #define NBUCK           (1u << BUCKBITS)
 #define NPART           256             /* partition = digest byte 0        */
-#define RECSZ           15              /* 9 residue + 6 locator            */
+#define RECSZ           17              /* 9 residue + 2 type + 6 locator   */
 #define RESID           9               /* digest bytes 3..11 stored        */
 #define KEYSZ           12              /* digest bytes 0..11 = the key     */
 #define KEYBITS         (KEYSZ * 8)     /* 24 implied by bucket + 72 stored */
 #define LOCSZ           6
-#define SRECSZ          18              /* scratch: 12 key + 6 locator      */
+#define TYPESZ          2               /* manifest position of the type    */
+#define SRECSZ          20              /* scratch: 12 key + 2 type + 6 loc */
+/* Type and locator sit together after the key in BOTH layouts, so one copy
+ * of TLSZ bytes converts a record either way, and both sort (key, type,
+ * locator): every copy of one word under one type is adjacent, highest
+ * priority source first. */
+#define TLSZ            (TYPESZ + LOCSZ)
+#define R_LOC           (RESID + TYPESZ)        /* locator in a stored rec  */
+#define S_LOC           (KEYSZ + TYPESZ)        /* locator in a scratch rec */
 /* The narrowest PIPED query, in hex characters.  Deliberately NOT KEYBITS/4:
  * the key is 96 bits so that the build can tell two colliding words apart,
  * but 64 bits already selects about one record (Nrec/2^64 is 8e-10 on a
@@ -568,8 +579,8 @@ extern void qsort_mt(void *a, size_t n, size_t es,
  * duplicates every word it re-reads instead of dropping it -- a silent,
  * compounding corruption that no lookup reports. */
 _Static_assert(KEYSZ == RESID + 3,      "key = 3 bucket bytes + residue");
-_Static_assert(RECSZ == RESID + LOCSZ,  "stored record is residue + locator");
-_Static_assert(SRECSZ == KEYSZ + LOCSZ, "scratch record is key + locator");
+_Static_assert(RECSZ == RESID + TLSZ,   "stored record is residue + type + locator");
+_Static_assert(SRECSZ == KEYSZ + TLSZ,  "scratch record is key + type + locator");
 _Static_assert(KEYSZ > 8, "dedup narrower than 72 bits silently drops one "
                           "of every colliding pair; see WHY 96 BITS");
 
@@ -2598,7 +2609,7 @@ static void manifest_write(void)
 
     f = fopen(tmp, "w");
     if (f == NULL) FATAL("open %s: %s", tmp, strerror(errno));
-    fprintf(f, "# mdindex manifest v4\n");
+    fprintf(f, "# mdindex manifest v5\n");
     fprintf(f, "types\t");
     for (i = 0; i < Nhtype; i++) { fprintf(f, "%s%s", first ? "" : ",",
                                            Htype[i].name); first = 0; }
@@ -2858,14 +2869,16 @@ static int manifest_read(int quiet)
              * v3 binary then refuses it, which is the point: that binary
              * would read index.rec correctly and silently ignore every
              * record in the overlay. */
+            /* v5 (1.38) put the 2-byte type into every record, so a v3 or
+             * v4 index.rec has the wrong record size and cannot be read. */
             int v = atoi(line + 20);
-            if (v != 3 && v != 4)
-                FATAL("%s holds a version %d index; this mdindex writes "
-                      "version 4, whose record is 15 bytes and whose key is "
-                      "96 bits, so that two words colliding in 64 bits both "
-                      "survive the build. The old index cannot be converted "
-                      "-- run 'mdindex build' to rebuild it, or use -d to "
-                      "point at a version 4 database.",
+            if (v != 5)
+                FATAL("%s holds a version %d index; this mdindex reads and "
+                      "writes version 5, whose record is 17 bytes and carries "
+                      "the type, so that dedup needs no read of a source line. "
+                      "The old index cannot be converted -- run 'mdindex "
+                      "build' to rebuild it, or use -d to point at a version "
+                      "5 database.",
                       Dbdir, v);
             continue;
         }
@@ -3069,7 +3082,8 @@ static void *scatter_thread(void *arg)
                 }
                 r = buf + (size_t)p * PARTBUF + fil[p];
                 memcpy(r, hv[k].dig, KEYSZ);
-                be_put(r + KEYSZ, loc, LOCSZ);
+                be_put(r + KEYSZ, (unsigned long long)t, TYPESZ);
+                be_put(r + S_LOC, loc, LOCSZ);
                 fil[p] += SRECSZ;
                 recs++;
             }
@@ -3230,9 +3244,9 @@ static int srec_cmp(const void *a, const void *b)
  * keys -- which is what lets one probe answer for all of them. */
 static int loc_cmp(const void *a, const void *b)
 {
-    int c = memcmp((const unsigned char *)a + KEYSZ,
-                   (const unsigned char *)b + KEYSZ, LOCSZ);
-    return c ? c : memcmp(a, b, KEYSZ);
+    int c = memcmp((const unsigned char *)a + S_LOC,
+                   (const unsigned char *)b + S_LOC, LOCSZ);
+    return c ? c : memcmp(a, b, S_LOC);
 }
 
 struct outbuf {
@@ -3322,44 +3336,16 @@ static void readall(int fd, void *buf, size_t n, const char *what)
  * would halve the I/O and skip the re-sort.  Worth writing when an update
  * stops finishing inside a coffee break; until then this is one code path
  * instead of two, and the one that cannot disagree with itself. */
-static int fetch_line(int fidx, unsigned long long off, char **out,
-                      size_t *outlen);
-
-/* Two records with one key and two locators are EITHER the same word read
- * from two files -- which priority says to keep once, and which is what
- * holds the index to its size when sources overlap -- OR two different
- * words whose digests collide, which must both survive.  Nothing in the
- * record distinguishes them, so the only honest test is to read the two
- * lines and compare them.  That costs two seeks, and is reached only on
- * an equal key, which is rare by construction: it is the collision rate,
- * plus however much the sources overlap.
- *
- * Returns 1 when the two locators name the same text, i.e. a duplicate
- * word rather than a collision. */
-static int same_line(unsigned long long la, unsigned long long lb)
-{
-    char   *p, *tmp;
-    size_t  na, nb;
-    int     eq;
-
-    if (la == lb) return 1;
-    if (!fetch_line((int)(la >> OFFBITS), la & (MAXOFF - 1), &p, &na))
-        return 0;                      /* unreadable: assume distinct */
-    tmp = xmalloc(na + 1);             /* fetch_line reuses one buffer */
-    memcpy(tmp, p, na);
-    if (!fetch_line((int)(lb >> OFFBITS), lb & (MAXOFF - 1), &p, &nb)) {
-        free(tmp);
-        return 0;
-    }
-    eq = (na == nb) && memcmp(tmp, p, na) == 0;
-    free(tmp);
-    return eq;
-}
-
-static int same_word(const unsigned char *a, const unsigned char *b)
-{
-    return same_line(be_get(a + KEYSZ, LOCSZ), be_get(b + KEYSZ, LOCSZ));
-}
+/* Dedup is decided by the record alone, with no read of a source line.
+ * An equal key under an equal TYPE is the same word met again -- the case
+ * that holds the index to its size when sources overlap, 9.9 billion drops
+ * on the 2026-10-18 build -- and the copy that sorts first, from the
+ * highest-priority file, is kept.  Two different words reaching one digest
+ * do so only through two different types (MD5x02 of password is MD5x01 of
+ * its own hex), and the type keeps both.  A same-type random collision in
+ * 96 bits is about 1e-9 across the whole index and is not worth a seek.
+ * The line-compare this replaces (1.24) cost two random reads per overlap
+ * and stalled a full build at about 130 reads a second. */
 
 static void emit_index(uint64_t *olddir, int oldfd)
 {
@@ -3389,7 +3375,7 @@ static void emit_index(uint64_t *olddir, int oldfd)
          * -- that is the whole point of having written it -- so it is
          * merged in rather than re-sorted with them.  Sorting the union
          * meant sorting 59 million records to absorb 30, and expanding
-         * every old record into 18-byte scratch form to do it. */
+         * every old record into scratch form to do it. */
         if (nnew * SRECSZ > arrcap) {
             free(arr);
             arrcap = (size_t)(nnew * SRECSZ) + (16 << 20);
@@ -3448,7 +3434,7 @@ static void emit_index(uint64_t *olddir, int oldfd)
                 oldscr[1] = (unsigned char)(obk >> 8);
                 oldscr[2] = (unsigned char)(obk);
                 memcpy(oldscr + 3, orec, RESID);              /* digest 3..11 */
-                memcpy(oldscr + KEYSZ, orec + RESID, LOCSZ);  /* locator     */
+                memcpy(oldscr + KEYSZ, orec + RESID, TLSZ);   /* type, loc   */
                 have_old = 1;
             }
             if (inew >= nnew && !have_old) break;
@@ -3502,14 +3488,14 @@ static void emit_index(uint64_t *olddir, int oldfd)
                  * line the surviving record names, so a full-digest query
                  * answered with a different password under a different
                  * type, which is true and useless. */
-                if (memcmp(r + KEYSZ, prev + KEYSZ, LOCSZ) == 0 ||
-                    same_word(r, prev)) { dropped++; continue; }
+                if (memcmp(r + KEYSZ, prev + KEYSZ, TYPESZ) == 0) {
+                    dropped++; continue; }
             }
             memcpy(prev, r, SRECSZ);
             haveprev = 1;
 
             memcpy(out, r + 3, RESID);
-            memcpy(out + RESID, r + KEYSZ, LOCSZ);
+            memcpy(out + RESID, r + KEYSZ, TLSZ);
             ob_put(&ob, out, RECSZ);
             dir[(((uint32_t)r[0] << 16) | ((uint32_t)r[1] << 8) | r[2]) + 1]++;
             total++;
@@ -3867,7 +3853,7 @@ static void probe_query(const struct query *q, uint32_t qi)
         for (m = a; m < hi; m++) {
             const unsigned char *r = Rec + m * RECSZ;
             if (memcmp(r, q->khi + 3, RESID) > 0) break;
-            cand_push(be_get(r + RESID, LOCSZ), qi);
+            cand_push(be_get(r + R_LOC, LOCSZ), qi);
         }
         if (b == bhi) break;
     }
@@ -3902,8 +3888,7 @@ static int main_has_record(const unsigned char *k)
                    memcmp(Rec + (lo - 1) * RECSZ, k + 3, RESID) == 0) lo--;
             for (; lo < dirget(b + 1) &&
                    memcmp(Rec + lo * RECSZ, k + 3, RESID) == 0; lo++)
-                if (same_line(be_get(Rec + lo * RECSZ + RESID, LOCSZ),
-                              be_get(k + KEYSZ, LOCSZ)))
+                if (memcmp(Rec + lo * RECSZ + RESID, k + KEYSZ, TYPESZ) == 0)
                     return 1;
             return 0;
         }
@@ -3927,7 +3912,7 @@ static void probe_overlay(const struct query *q, uint32_t qi)
     for (m = a; m < Nadd; m++) {
         const unsigned char *r = Add + m * SRECSZ;
         if (memcmp(r, q->khi, KEYSZ) > 0) break;
-        cand_push(be_get(r + KEYSZ, LOCSZ), qi);
+        cand_push(be_get(r + S_LOC, LOCSZ), qi);
     }
 }
 
@@ -4011,8 +3996,8 @@ static void overlay_absorb(void)
         while (i < nnew) {
             unsigned long long j = i;
             while (j < nnew &&
-                   memcmp(nw + j * SRECSZ + KEYSZ,
-                          nw + i * SRECSZ + KEYSZ, LOCSZ) == 0) j++;
+                   memcmp(nw + j * SRECSZ + S_LOC,
+                          nw + i * SRECSZ + S_LOC, LOCSZ) == 0) j++;
             pct_line("probing the index", i, nnew, &lastp, tp);
             probes++;
             if (main_has_record(nw + i * SRECSZ)) { already += j - i; i = j; continue; }
@@ -4041,7 +4026,7 @@ static void overlay_absorb(void)
         else
             r = Add + iold++ * SRECSZ;
 
-        if (haveprev && memcmp(r, prev, SRECSZ) == 0) { repeat++; continue; }
+        if (haveprev && memcmp(r, prev, KEYSZ + TYPESZ) == 0) { repeat++; continue; }
         memcpy(prev, r, SRECSZ);
         haveprev = 1;
         /* No probe here.  The new side was filtered above, and a record
@@ -4116,7 +4101,7 @@ static void scan_all(const struct query *q, size_t nq)
             while (cur < nq && memcmp(q[cur].khi, key, KEYSZ) < 0) cur++;
             for (j = cur; j < nq && memcmp(q[j].klo, key, KEYSZ) <= 0; j++)
                 if (memcmp(q[j].khi, key, KEYSZ) >= 0)
-                    cand_push(be_get(r + RESID, LOCSZ), (uint32_t)j);
+                    cand_push(be_get(r + R_LOC, LOCSZ), (uint32_t)j);
         }
     }
     close(fd);
@@ -5366,7 +5351,10 @@ static unsigned long long run_ordered(const unsigned char *rec,
 
     *dup = 0;
     for (i = 1; i < n; i++) {
-        int c = memcmp(rec + i * RECSZ, rec + (i - 1) * RECSZ, RECSZ);
+        /* Residue + type: one record per word per type is the invariant
+         * since 1.38, so an equal pair here is a dedup escape whatever
+         * its locators. */
+        int c = memcmp(rec + i * RECSZ, rec + (i - 1) * RECSZ, RESID + TYPESZ);
         if (c > 0) continue;
         *dup = (c == 0);
         return i;
@@ -5469,7 +5457,7 @@ static void cmd_check(int argc, char **argv)
     if (doadd && Nadd) {
         unsigned long long i, aord = 0, adup = 0;
         for (i = 1; i < Nadd; i++) {
-            int c = memcmp(Add + i * SRECSZ, Add + (i - 1) * SRECSZ, KEYSZ);
+            int c = memcmp(Add + i * SRECSZ, Add + (i - 1) * SRECSZ, KEYSZ + TYPESZ);
             if (c > 0) continue;
             if (c == 0) adup++; else aord++;
             if (aord + adup <= SHOWMAX)
@@ -5819,7 +5807,8 @@ static void cmd_selftest(void)
 
     printf("\nend to end, a.txt at priority 0:\n");
     st_write("a.txt", "password\nabc\n");
-    st_write("b.txt", "abc\n$HEX[636166c3a9]\nhunter2\n");
+    st_write("b.txt", "abc\n$HEX[636166c3a9]\nhunter2\n"
+                      "5f4dcc3b5aa765d61d8327deb882cf99\n");
     snprintf(apath, sizeof(apath), "%s/a.txt", Stdir);
     snprintf(bpath, sizeof(bpath), "%s/b.txt", Stdir);
     a[0] = apath; a[1] = bpath; a[2] = NULL;
@@ -5883,6 +5872,16 @@ static void cmd_selftest(void)
     ck(st_run("00000000000000000000000000000000")[0] == 0,
        "a digest that is not present prints nothing");
 
+    {
+        /* The one genuine way two words share a digest: MD5x02 of password
+         * is md5 of its hex, which is MD5x01 of the hex as a word.  The
+         * type keeps both records, so the query answers with both. */
+        const char *o = st_run("696d29e0940a4957748fe3fc9efd22a3");
+        ck(strstr(o, "MD5x02 696d29e0940a4957748fe3fc9efd22a3:password\n") != NULL &&
+           strstr(o, "MD5x01 696d29e0940a4957748fe3fc9efd22a3:"
+                     "5f4dcc3b5aa765d61d8327deb882cf99\n") != NULL,
+           "a digest two words reach through two types returns both");
+    }
     ck(st_fidx("900150983cd24fb0d6963f7d28e17f72") == 0,
        "abc is in both files and resolves to file 0, the first that had it");
 
@@ -5972,11 +5971,11 @@ static void cmd_selftest(void)
     }
     {
         /* Two records whose keys differ only in the LAST residue byte,
-         * and two whose keys are equal and differ only in the locator.
-         * Together these pin the comparison width at exactly RESID: a
-         * narrower one reads the first pair as a repeat, a wider one
-         * reads the second as a legitimate ascending pair and lets a
-         * dedup escape through. */
+         * then equal keys differing in type or only in locator.  Together
+         * these pin the comparison width at exactly RESID + TYPESZ: a
+         * narrower one reads a type alias as a repeat, a wider one reads
+         * a second copy of a word as a legitimate ascending pair and lets
+         * a dedup escape through. */
         unsigned char r[3 * RECSZ];
         unsigned long long at;
         int dup = 7;
@@ -5992,27 +5991,32 @@ static void cmd_selftest(void)
         at = run_ordered(r, 3, &dup);
         ck(at == 1 && !dup, "a descending pair is reported, as out of order");
 
-        /* Same key, different locator.  Legitimate since dedup keys on
-         * the whole record: two words whose digests collide, which the
-         * old key-only rule threw one of away.  Ascending, because
-         * records sort key-major and locator-minor. */
-        memcpy(r + 1 * RECSZ, r + 0 * RECSZ, RESID);
-        r[1 * RECSZ + RESID] = 0x01;
+        /* Same key, higher TYPE: two words reaching one digest through
+         * two types, which dedup keeps.  Ascending. */
+        memcpy(r + 1 * RECSZ, r + 0 * RECSZ, RECSZ);
+        r[1 * RECSZ + RESID + 1] = 0x01;
         at = run_ordered(r, 3, &dup);
-        ck(at == 0, "an equal key with a higher locator is in order");
+        ck(at == 0, "an equal key with a higher type is in order");
 
-        /* A repeated WHOLE record is the dedup escape now. */
+        /* Same key and type at another locator: the same word from a
+         * second file, which dedup must have dropped. */
+        memcpy(r + 1 * RECSZ, r + 0 * RECSZ, RECSZ);
+        r[1 * RECSZ + R_LOC + LOCSZ - 1] = 0x01;
+        at = run_ordered(r, 3, &dup);
+        ck(at == 1 && dup, "an equal key and type at another locator is a duplicate");
+
+        /* A repeated WHOLE record is a duplicate too. */
         memcpy(r + 1 * RECSZ, r + 0 * RECSZ, RECSZ);
         at = run_ordered(r, 3, &dup);
         ck(at == 1 && dup, "an identical record is reported, as a duplicate");
 
-        /* And the locator must still be compared: equal key with a LOWER
-         * locator is descending, which is a sort fault. */
+        /* And the type must be compared: equal key with a LOWER type is
+         * descending, which is a sort fault. */
         memcpy(r + 1 * RECSZ, r + 0 * RECSZ, RECSZ);
-        r[0 * RECSZ + RESID] = 0x01;
+        r[0 * RECSZ + RESID + 1] = 0x01;
         at = run_ordered(r, 3, &dup);
-        ck(at == 1 && !dup, "an equal key with a lower locator is out of order");
-        r[0 * RECSZ + RESID] = 0x00;
+        ck(at == 1 && !dup, "an equal key with a lower type is out of order");
+        r[0 * RECSZ + RESID + 1] = 0x00;
 
         ck(run_ordered(r, 1, &dup) == 0 && run_ordered(r, 0, &dup) == 0,
            "a bucket of one record, and of none, are both in order");

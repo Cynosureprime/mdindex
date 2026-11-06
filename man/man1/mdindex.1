@@ -1,6 +1,6 @@
 .\" mdindex(1) -- man-macro reference page
-.\" $Revision: 1.20 $
-.TH MDINDEX 1 "2026-10-20" "mdindex 1.33" "Password Recovery"
+.\" $Revision: 1.22 $
+.TH MDINDEX 1 "2026-11-05" "mdindex 1.38" "Password Recovery"
 .SH NAME
 mdindex \- index very large wordlists by hash, and look words up by digest
 .SH SYNOPSIS
@@ -248,6 +248,16 @@ That order is recorded in the manifest and every later
 .B update
 honours it; within a file the first occurrence wins.  A word re-appearing in
 an updated file adds nothing to the index.
+.PP
+Every record carries its type, and dedup is decided by key and type alone,
+without reading a source line: an equal key under an equal type is the same
+word met again.  Two different words reach one digest only through two
+different types \(em MD5x02 of
+.B password
+is MD5x01 of its own hex \(em and both are kept, so such a digest answers
+with both words.  A word stored both raw and as
+.B $HEX[]
+is one word, and is kept once.
 .SH COMMANDS
 With no arguments at all,
 .B lookup
@@ -305,7 +315,7 @@ says the overlay is getting large, or whenever it suits.
 .TP
 .BI check " [index|overlay|all]"
 Read every record and verify that each bucket is strictly increasing on the
-stored key.  A descending pair is a sort failure; an equal pair is a
+stored key and type.  A descending pair is a sort failure; an equal pair is a
 duplicate that dedup should have dropped.  Both have one cause, since dedup
 only ever compares adjacent records.
 .IP
@@ -357,8 +367,8 @@ answered by one sequential pass over the index instead of one random read per
 hash, which
 .B mdindex
 switches to automatically above roughly
-.I records * 15 * 340 / 299e6
-queries \(em about 257,000 against the full-size index above.  See
+.I records * 17 * 340 / 299e6
+queries \(em about 292,000 against the full-size index above.  See
 .B \-v.
 .TP
 .B info
@@ -727,7 +737,8 @@ Bucket directory, 16,777,217 big-endian 64-bit offsets into
 one per bucket plus a terminator.
 .TP
 .I index.rec
-The records, 15 bytes each, sorted by key: 9 bytes of digest residue then a
+The records, 17 bytes each, sorted by key and type: 9 bytes of digest
+residue, the 2-byte type (its position in the manifest's type list), then a
 48-bit locator packing an 11-bit file index and a 37-bit offset.  The other
 24 bits of the 96-bit key are implied by the bucket.  Anything that reads
 this file must take the record width from the same source the writer does:
@@ -740,7 +751,8 @@ The overlay: records added since the last
 .B build
 or
 .BR compact ,
-18 bytes each \(em the whole 96-bit key, then the same 48-bit locator \(em
+20 bytes each \(em the whole 96-bit key, the type, then the same 48-bit
+locator \(em
 sorted, binary-searched, and with no directory of its own.  Written by
 .BR update ,
 removed by
@@ -753,7 +765,7 @@ Scratch partitions, present only while a build or update is running and
 removed on success.  A
 .I part
 directory left behind means the run died; it is safe to delete.  Scratch
-peaks at about 108 bytes per source line with all six types: one 18-byte
+peaks at about 120 bytes per source line with all six types: one 20-byte
 record per line per type, written before dedup.
 .PP
 Everything on disk is big-endian, so the database is portable between
@@ -793,11 +805,12 @@ Expect
 .I index.rec
 to be
 .I larger
-than the wordlists it indexes.  A record is 15 bytes whatever the word
+than the wordlists it indexes.  A record is 17 bytes whatever the word
 costs, and one source line leaves about 3.6 of them once duplicate keys are
 dropped \(em six types, and up to three NTLM readings of a non-ASCII word
-\(em so a line averaging 13 bytes of text occupies some 55 bytes of index.
-These three sources total 53.6 GB and their index is 226 GB.  The ratio is a
+\(em so a line averaging 13 bytes of text occupies some 61 bytes of index.
+These three sources total 53.6 GB; their index was 226 GB at 15 bytes a
+record, and is about 256 GB at 17.  The ratio is a
 property of the wordlist rather than of the index: it falls as the average
 line gets longer, and
 .B \-H
