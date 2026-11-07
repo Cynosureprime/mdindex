@@ -1,6 +1,6 @@
 .\" mdindex(1) -- man-macro reference page
-.\" $Revision: 1.22 $
-.TH MDINDEX 1 "2026-11-05" "mdindex 1.38" "Password Recovery"
+.\" $Revision: 1.23 $
+.TH MDINDEX 1 "2026-11-07" "mdindex 1.38" "Password Recovery"
 .SH NAME
 mdindex \- index very large wordlists by hash, and look words up by digest
 .SH SYNOPSIS
@@ -78,8 +78,9 @@ MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
 .fi
 .RE
 .SS The index is deliberately lossy
-A record stores 96 bits of the digest, not all of it, and does not record
-which hash function produced it.  Both are recovered rather than stored: a
+A record stores 96 bits of the digest, not all of it, and the type it was
+made under.  The type decides duplicates: two records are one word met
+again only when both key and type are equal.  The answer is not stored: a
 hit is answered by reading the line, regenerating every configured digest of
 it, and comparing against the whole hash you supplied.
 .PP
