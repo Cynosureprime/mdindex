@@ -106,8 +106,11 @@
  * went to v3, and called all 16,777,216 buckets unsorted on a good index.
  *
  *
- * $Revision: 1.38 $
+ * $Revision: 1.39 $
  * $Log: mdindex.c,v $
+ * Revision 1.39  2026/11/12 21:28:37  dlr
+ * Blocked Bloom filter, index.flt, so a whole-key miss is answered without probing index.rec. 4KB header (magic MDIXFLT1, version, page bits, k, page size, nrec, index.rec mtime) then 2^pb 4KB pages; the top pb key bits pick the page, k=6 bit positions by double hashing within it, sized to at least 9 bits per key (pb capped at 24), about 1.3% false positives. Built from the index itself in one sequential pass over index.rec and index.dir: new command filter, and build and compact rewrite it. mmapped MADV_RANDOM, so a query touches one page. Covers index.rec only, the overlay is always probed. Used only when the header nrec and mtime match the current index.rec, otherwise a NOTE and lookup proceeds without it. Partial-key queries bypass it. info reports it, check tests every key against it and counts a failure as a fault, -v reports rejections. Selftest section filter covers rejection rate, hits, partial bypass, a zeroed filter and a stale one. Measured on 15.09G records, 13,709 absent SHA1: 115.3s without, 63.1s with the filter on the Fusion HDD tier, 5.85s with the index on SSD; 13,533 rejected, 176 probed. Building the 17.2GB filter took 1,355s.
+ *
  * Revision 1.38  2026/11/05 21:03:51  dlr
  * Dedup on key and TYPE, with no read of a source line, and carry the type in every record. 1.24 made an equal key with differing locators read both source lines and let the text decide, so that two different words reaching one digest both survived. Its log called the reads rare by construction; they are not, because every word the sources share is an equal key at two locators, and the 2026-10-18 build dropped 9,891,671,853 of them. On the first full build since, a stack sample put 1,477 of 1,481 samples in emit_index, same_word, same_line, fetch_line: two random reads per overlap at about 130 a second on the Fusion HDD, and index.rec.new had reached 3.9 million of some 15 billion records after four and a half hours, so the build was stopped. Two different words reach one digest only through two different types (MD5x02 of password is MD5x01 of its own hex), while a same-type random collision in 96 bits is about 1e-9 over the whole index. So the record now carries the type, as its 2-byte position in the manifest type list, and the rule needs no read: an equal key under an equal type is the same word and the copy from the highest-priority file is kept, while an equal key under a different type is kept. Scratch records are key, type, locator, 20 bytes; stored records are residue, type, locator, 17 bytes; both sort key-major then type, so every copy of one word under one type is adjacent and one compare against the previous record decides it. The overlay check against the main index, the overlay merge and check use the same rule, so nothing in mdindex reads a line to deduplicate any more, and same_line and same_word are gone. The iteration count is not stored; it is derived when a hit is displayed. Manifest v5; a v3 or v4 database has the wrong record size and is refused with a rebuild message. Verified on the first 2,000,000 lines of hibp.pass indexed twice, so that every record is a cross-file duplicate: 1.37 took 183.1s to emit and 1.38 takes 2.2s. 1.37 kept 518,404 equal-key pairs and 1.38 keeps 329, and all 329 are MD5x01 of a 32-hex line beside MD5x02 of the word it is the hex of, the case the type exists for. The other 518,075 were one word stored both raw and as $HEX[], which 1.37 compared as raw text and kept twice. Lookup of 3,464 queries gives identical distinct answers from both databases, with 140 repeated lines from 1.37 and none from 1.38. check all is clean; update files 12 new records and recognises 12 as already indexed without a read; compact gives exactly the sum. Selftest 70 passed, with a new case requiring a digest reached by two words through two types to answer with both, confirmed to fail against a build that drops on the key alone.
  *
@@ -460,6 +463,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <utime.h>
 #include <sys/types.h>
 #ifndef _WIN32
 #include <sys/mman.h>
@@ -538,7 +542,7 @@ int getentropy(void *buf, size_t buflen)
 #define DEVNULL "/dev/null"
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.38 2026/11/05 21:03:51 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdindex.c,v 1.39 2026/11/12 21:28:37 dlr Exp dlr $";
 static const char *Prog = "mdindex";
 
 extern void qsort_mt(void *a, size_t n, size_t es,
@@ -3662,6 +3666,75 @@ static int                  Srcfd[MAXFILES];
 static const unsigned char *Add;        /* mmap, SRECSZ records, sorted */
 static unsigned long long   Nadd;
 
+/* ---- the filter ----
+ *
+ * index.flt is a blocked Bloom filter over every KEY in index.rec, so a
+ * query for a key the index does not hold is answered without the probe.
+ * The probe is a random read of a file far too large to cache, measured at
+ * 119 a second; on a batch that is mostly misses -- the normal case -- it
+ * is the whole cost of the lookup.  One filter page is one 4 KB read, from
+ * a file a sixteenth the size, and is all a rejected query costs.
+ *
+ * Layout: a FLTHDR-byte header, then 2^pagebits pages of FLTPAGE bytes.
+ * The key is already a uniform digest, so it is its own hash: the top
+ * pagebits bits choose the page, and key bytes 4..11 give FLTK bit
+ * positions inside it by double hashing.  Pages are chosen by the leading
+ * bits, so index.rec, which is sorted by key, fills them in order and the
+ * whole file is written front to back in one pass -- and a sorted batch of
+ * queries reads them in order too.
+ *
+ * Sized to at least FLTBPK bits per key: a filter cannot reject an absent
+ * key with false-positive rate p in fewer than log2(1/p) bits per stored
+ * key, so its size follows the record count, not a choice.  At 15.1
+ * billion records that is 2^22 pages, 16 GB, 9.1 bits a key, k = 6, about
+ * 1.3% false positives.  A false positive costs only the probe it would
+ * have cost anyway.
+ *
+ * It covers index.rec ONLY.  The overlay is searched for every query
+ * regardless (run_batch), so update never touches the filter; only build
+ * and compact rewrite index.rec, and both rewrite the filter after it.
+ * The header names the index it was built from by record count and
+ * mtime, and a filter that does not match is NOT USED -- a filter over a
+ * different key set would turn real hits into a silent "absent", the one
+ * wrong answer this tool must never give. */
+#define FLTMAGIC        "MDIXFLT1"
+#define FLTHDR          4096
+#define FLTPAGE         4096
+#define FLTK            6
+#define FLTBPK          9
+
+static const unsigned char *Flt;        /* mmap of index.flt, or NULL   */
+static size_t               Fltsz;
+static int                  Fltpb;      /* log2 of the page count       */
+static unsigned long long   Nfltrej, Nflttest, Nfltbad;
+
+static const unsigned char *flt_page(const unsigned char *flt, int pb,
+                                     const unsigned char *k)
+{
+    uint32_t top = ((uint32_t)k[0] << 16) | ((uint32_t)k[1] << 8) | k[2];
+    return flt + FLTHDR + (size_t)(top >> (BUCKBITS - pb)) * FLTPAGE;
+}
+
+static void flt_pos(const unsigned char *k, uint32_t pos[FLTK])
+{
+    uint32_t h1 = (uint32_t)be_get(k + 4, 4), h2 = (uint32_t)be_get(k + 8, 4) | 1;
+    int i;
+    for (i = 0; i < FLTK; i++)
+        pos[i] = (h1 + (uint32_t)i * h2) & (FLTPAGE * 8 - 1);
+}
+
+/* May the index hold this 12-byte key?  0 means it certainly does not. */
+static int flt_may_hold(const unsigned char *k)
+{
+    const unsigned char *pg = flt_page(Flt, Fltpb, k);
+    uint32_t pos[FLTK];
+    int i;
+    flt_pos(k, pos);
+    for (i = 0; i < FLTK; i++)
+        if (!(pg[pos[i] >> 3] & (1u << (pos[i] & 7)))) return 0;
+    return 1;
+}
+
 static uint64_t dirget(uint32_t b)
 {
     return be_get(Dir + (size_t)b * 8, 8);
@@ -3671,6 +3744,7 @@ static uint64_t dirget(uint32_t b)
  * already read the manifest and checked the sources, can get at the index
  * for its own probes without repeating either. */
 static void index_unmap(void);
+static void filt_map(void);
 
 /* Re-mapping RELEASES first.  update and the selftest both call this more
  * than once in a process, and without the release each call leaked the
@@ -3726,6 +3800,7 @@ static void index_map(void)
     }
 
     memset(Srcfd, -1, sizeof(Srcfd));
+    filt_map();
 }
 
 /* Release the mappings before replacing or deleting what they map.
@@ -3748,6 +3823,128 @@ static void index_unmap(void)
                        Rec = NULL; }
     if (Add != NULL) { munmap((void *)Add, (size_t)(Nadd * SRECSZ));
                        Add = NULL; }
+    if (Flt != NULL) { munmap((void *)Flt, Fltsz); Flt = NULL; }
+}
+
+static long long index_mtime(void)
+{
+    struct stat sb;
+    if (stat(pathcat("index.rec"), &sb) != 0)
+        FATAL("stat index.rec: %s", strerror(errno));
+    return (long long)sb.st_mtime;
+}
+
+/* Map index.flt if it describes the index.rec that is mapped now.  An
+ * absent filter is normal (a database built before it existed) and costs
+ * only speed.  A mismatched one is said out loud and left unused. */
+static void filt_map(void)
+{
+    unsigned char h[FLTHDR];
+    unsigned long long sz;
+    int fd, pb;
+
+    if (Flt != NULL) { munmap((void *)Flt, Fltsz); Flt = NULL; }
+    if (access(pathcat("index.flt"), R_OK) != 0) return;
+    fd = open(pathcat("index.flt"), O_RDONLY | O_BINARY);
+    if (fd < 0) FATAL("open index.flt: %s", strerror(errno));
+    sz = fsize(pathcat("index.flt"));
+    pb = -1;
+    if (sz >= FLTHDR) {
+        preadall(fd, h, FLTHDR, 0, "index.flt");
+        if (memcmp(h, FLTMAGIC, 8) == 0 && be_get(h + 16, 4) == FLTK &&
+            be_get(h + 20, 4) == FLTPAGE && be_get(h + 12, 4) <= BUCKBITS)
+            pb = (int)be_get(h + 12, 4);
+    }
+    if (pb < 0 || sz != FLTHDR + ((unsigned long long)FLTPAGE << pb)) {
+        fprintf(stderr, "NOTE: %s/index.flt is not a filter this version "
+                "reads; it is not used. 'mdindex filter' rewrites it.\n", Dbdir);
+        close(fd);
+        return;
+    }
+    if (be_get(h + 24, 8) != Nrec ||
+        (long long)be_get(h + 32, 8) != index_mtime()) {
+        fprintf(stderr, "NOTE: %s/index.flt was built for a different "
+                "index.rec (%s records); it is not used. 'mdindex filter' "
+                "rebuilds it.\n", Dbdir, commify(be_get(h + 24, 8)));
+        close(fd);
+        return;
+    }
+    Fltsz = (size_t)sz;
+    Flt = mmap(NULL, Fltsz, PROT_READ, MAP_SHARED, fd, 0);
+    if (Flt == MAP_FAILED) FATAL("mmap index.flt: %s", strerror(errno));
+    close(fd);
+    Fltpb = pb;
+#ifdef MADV_RANDOM
+    /* One page per query, and a batch's pages are scattered: read-ahead
+     * would only fetch neighbours nobody asked for. */
+    (void)madvise((void *)(uintptr_t)Flt, Fltsz, MADV_RANDOM);
+#endif
+}
+
+/* Write index.flt from the index.rec that is mapped now: one sequential
+ * pass, no source read and no hashing, since every key is the bucket
+ * number followed by the record's residue.
+ * ponytail: a separate pass after build and compact, one more read of
+ * index.rec (about 18 minutes at full size).  Writing it from emit_index's
+ * own output needs the final record count before the first page, which
+ * only the dedup at the end of the merge knows. */
+static void filter_write(void)
+{
+    unsigned long long need = (Nrec * FLTBPK + FLTPAGE * 8 - 1) / (FLTPAGE * 8);
+    unsigned char h[FLTHDR], pg[FLTPAGE], k[KEYSZ];
+    uint32_t b, cur = 0, npages;
+    struct outbuf ob;
+    double t0 = now();
+    int pb = 0;
+
+    while (pb < BUCKBITS && (1ULL << pb) < need) pb++;
+    npages = 1u << pb;
+
+#ifdef MADV_SEQUENTIAL
+    (void)madvise((void *)(uintptr_t)Rec, (size_t)(Nrec * RECSZ), MADV_SEQUENTIAL);
+#endif
+    memset(h, 0, sizeof(h));
+    memcpy(h, FLTMAGIC, 8);
+    be_put(h + 8, 1, 4);
+    be_put(h + 12, (unsigned long long)pb, 4);
+    be_put(h + 16, FLTK, 4);
+    be_put(h + 20, FLTPAGE, 4);
+    be_put(h + 24, Nrec, 8);
+    be_put(h + 32, (unsigned long long)index_mtime(), 8);
+
+    ob_open(&ob, pathcat("index.flt.new"), 8 * 1024 * 1024);
+    ob_put(&ob, h, FLTHDR);
+    memset(pg, 0, sizeof(pg));
+    for (b = 0; b < NBUCK; b++) {
+        uint64_t lo = dirget(b), hi = dirget(b + 1), m;
+        uint32_t page = b >> (BUCKBITS - pb);
+
+        while (cur < page) { ob_put(&ob, pg, FLTPAGE); memset(pg, 0, FLTPAGE); cur++; }
+        k[0] = (unsigned char)(b >> 16); k[1] = (unsigned char)(b >> 8);
+        k[2] = (unsigned char)b;
+        for (m = lo; m < hi; m++) {
+            uint32_t pos[FLTK];
+            int i;
+            memcpy(k + 3, Rec + m * RECSZ, RESID);
+            flt_pos(k, pos);
+            for (i = 0; i < FLTK; i++) pg[pos[i] >> 3] |= (unsigned char)(1u << (pos[i] & 7));
+        }
+        if (Verbose && (b & 0xFFFFF) == 0xFFFFF)
+            fprintf(stderr, "\r  filter %3u%%  %.0fs   ",
+                    (unsigned)(((unsigned long long)b + 1) * 100 / NBUCK), now() - t0);
+    }
+    while (cur < npages) { ob_put(&ob, pg, FLTPAGE); memset(pg, 0, FLTPAGE); cur++; }
+    ob_close(&ob);
+    if (Verbose) fputc('\n', stderr);
+
+    if (Flt != NULL) { munmap((void *)Flt, Fltsz); Flt = NULL; }  /* Windows */
+    if (rename(pathcat("index.flt.new"), pathcat("index.flt")) != 0)
+        FATAL("rename index.flt: %s", strerror(errno));
+    fprintf(stderr, "filter: %s pages, %s bytes, %.1f bits per key, %.1fs\n",
+            commify(npages), commify(FLTHDR + (unsigned long long)npages * FLTPAGE),
+            Nrec ? (double)npages * FLTPAGE * 8 / (double)Nrec : 0.0, now() - t0);
+    filt_map();
+    if (Flt == NULL) FATAL("index.flt just written does not map");
 }
 
 static void index_open(void)
@@ -4303,7 +4500,18 @@ static void run_batch(struct query *q, size_t nq)
         Didscan = 1;
         scan_all(q, nq);
     } else {
-        for (i = 0; i < nq; i++) probe_query(&q[i], (uint32_t)i);
+        /* The filter answers only for a whole key.  A shorter query names
+         * a RANGE of keys, which a filter cannot speak for, so it probes
+         * as before.  Not on the scan path: that reads index.rec once
+         * whatever the batch holds, and a page per query would be an
+         * extra random read each. */
+        for (i = 0; i < nq; i++) {
+            if (Flt != NULL && q[i].nbits >= KEYBITS) {
+                Nflttest++;
+                if (!flt_may_hold(q[i].klo)) { Nfltrej++; continue; }
+            }
+            probe_query(&q[i], (uint32_t)i);
+        }
     }
     /* Both paths above read index.rec only.  The overlay is searched here
      * so neither can forget it -- a lookup that silently skipped it would
@@ -4599,6 +4807,12 @@ static void cmd_lookup(int argc, char **argv)
             rate_line("sort", (unsigned long long)Asked, Tsort);
             rate_line(Didscan ? "index scan" : "index probe",
                       (unsigned long long)Asked, Tprobe);
+            if (Flt != NULL)
+                fprintf(stderr, "  %-14s %8s   %s of %s whole-key queries "
+                        "rejected without a probe\n", "filter", "",
+                        commify(Nfltrej), commify(Nflttest));
+            else
+                fprintf(stderr, "  %-14s %8s   none in use\n", "filter", "");
             rate_line("fetch+verify", (unsigned long long)Ncand, Tfetch);
             fprintf(stderr, "  %-14s %8s   %s hash computations\n",
                     "regenerated", "", commify(Nhashcalc));
@@ -5097,6 +5311,8 @@ static void cmd_build(int argc, char **argv)
     emit_index(NULL, -1);
     part_remove();
     manifest_write();
+    index_map();
+    filter_write();
     fprintf(stderr, "done in %.1fs\n", now() - t0);
 }
 
@@ -5258,7 +5474,22 @@ static void cmd_compact(void)
         FATAL("unlink add.rec: %s", strerror(errno));
     manifest_write();
     free(olddir);
+    /* index.rec was just replaced, so the filter now names an index that
+     * no longer exists and filt_map would refuse it; write it afresh. */
+    index_map();
+    filter_write();
     fprintf(stderr, "done in %.1fs\n", now() - t0);
+}
+
+/* Write index.flt for the index as it stands: the one-time step for a
+ * database built before the filter existed, and the repair for one whose
+ * filter does not match. */
+static void cmd_filter(void)
+{
+    index_open();
+    fprintf(stderr, "writing the filter for %s records in %s\n",
+            commify(Nrec), Dbdir);
+    filter_write();
 }
 
 static void cmd_info(void)
@@ -5281,6 +5512,13 @@ static void cmd_info(void)
             printf("overlay    none; the index is one array\n");
         n += a;
     }
+    index_map();
+    if (Flt != NULL) {
+        double bpk = Nrec ? (double)(Fltsz - FLTHDR) * 8 / (double)Nrec : 0.0;
+        printf("filter     %s bytes, %s pages, %.1f bits per key, k=%d\n",
+               commify(Fltsz), commify(1ULL << Fltpb), bpk, FLTK);
+    } else
+        printf("filter     none in use; 'mdindex filter' writes one\n");
     printf("directory  %s buckets, %s bytes\n",
            commify(NBUCK), commify(8ULL * (NBUCK + 1)));
     printf("key        %d bits stored, %d bits implied by bucket\n",
@@ -5393,6 +5631,19 @@ static unsigned long long index_scan(const unsigned char *rec,
                        (unsigned long long)b, commify(lo), commify(hi));
             continue;
         }
+        /* Every key the index holds must pass the filter: one that does
+         * not is a hit lookup would silently report absent.  Checked in
+         * this pass because it is the pass that already reads every
+         * record. */
+        if (Flt != NULL) {
+            unsigned char k[KEYSZ];
+            k[0] = (unsigned char)(b >> 16); k[1] = (unsigned char)(b >> 8);
+            k[2] = (unsigned char)b;
+            for (at = lo; at < hi; at++) {
+                memcpy(k + 3, rec + at * RECSZ, RESID);
+                if (!flt_may_hold(k)) Nfltbad++;
+            }
+        }
         if (hi - lo < 2) continue;
 
         at = run_ordered(rec + lo * RECSZ, hi - lo, &dup);
@@ -5447,6 +5698,13 @@ static void cmd_check(int argc, char **argv)
         bad = index_scan(Rec, &nord, &ndup);
         printf("%s: %s buckets out of order, %s with a duplicate key, %.0fs\n",
                Dbdir, commify(nord), commify(ndup), now() - t0);
+        if (Flt != NULL)
+            printf("%s/index.flt: %s keys the filter rejects%s\n", Dbdir,
+                   commify(Nfltbad),
+                   Nfltbad ? " -- lookups would miss them; run 'mdindex filter'" : "");
+        else
+            printf("%s/index.flt: none in use, not checked\n", Dbdir);
+        bad += Nfltbad;
     }
 
     /* The overlay is searched by binary search, so it must be sorted on
@@ -5957,6 +6215,79 @@ static void cmd_selftest(void)
            "  and the word it folded in answers exactly as before");
     }
 
+    printf("\nfilter:\n");
+    {
+        unsigned long long nord, ndup, rej = 0, r0;
+        unsigned char k[KEYSZ], md[MD5_DIGEST_LENGTH];
+        char  w[32];
+        int   i, fd, sv = Verbose;
+
+        ck(Flt != NULL, "compact leaves a filter that matches the new index");
+        Nfltbad = 0;
+        index_scan(Rec, &nord, &ndup);
+        ck(Nfltbad == 0, "  every key the index holds passes it");
+        for (i = 0; i < 1000; i++) {
+            snprintf(w, sizeof(w), "absent-%d", i);
+            MD5((const unsigned char *)w, strlen(w), md);
+            memcpy(k, md, KEYSZ);
+            if (!flt_may_hold(k)) rej++;
+        }
+        ck(rej >= 990, "  and it rejects at least 990 of 1,000 absent keys");
+
+        r0 = Nfltrej;
+        ck(st_run("0123456789abcdef0123456789abcdef")[0] == 0 &&
+           Nfltrej == r0 + 1, "a whole-key miss is answered by the filter");
+        r0 = Nfltrej;
+        ck(strstr(st_run("5f4dcc3b5aa765d61d8327deb882cf99"),
+                  "MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password\n") != NULL &&
+           Nfltrej == r0, "  a whole-key hit passes it and still answers");
+        ck(strstr(st_run("5f4dcc3b5aa765d6"),
+                  "MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password\n") != NULL &&
+           Nfltrej == r0, "  a partial query bypasses it");
+
+        /* The check must be able to fail: zero every page, so the filter
+         * rejects everything, and it must count every record. */
+        {
+            unsigned char *z = calloc(1, Fltsz - FLTHDR);
+            fd = open(pathcat("index.flt"), O_WRONLY | O_BINARY);
+            if (z == NULL || fd < 0) FATAL("selftest: reopen index.flt");
+            if (lseek(fd, FLTHDR, SEEK_SET) != FLTHDR)
+                FATAL("selftest: seek index.flt: %s", strerror(errno));
+            writeall(fd, z, Fltsz - FLTHDR);
+            close(fd);
+            free(z);
+        }
+        filt_map();
+        Nfltbad = 0;
+        index_scan(Rec, &nord, &ndup);
+        ck(Nfltbad == Nrec && Nrec > 0,
+           "a filter that rejects held keys is counted by check");
+        ck(st_run("5f4dcc3b5aa765d61d8327deb882cf99")[0] == 0,
+           "  (and would have hidden a real hit, which is why)");
+
+        /* A filter for another index.rec must not be used. */
+        Verbose = 0;
+        st_saved = st_hush();
+        filter_write();
+        {
+            struct utimbuf ut;
+            ut.actime = ut.modtime = (time_t)(index_mtime() + 10);
+            if (utime(pathcat("index.rec"), &ut) != 0)
+                FATAL("selftest: utime index.rec: %s", strerror(errno));
+        }
+        index_map();
+        st_speak(st_saved);
+        ck(Flt == NULL, "a filter built for a different index.rec is not used");
+        ck(strstr(st_run("5f4dcc3b5aa765d61d8327deb882cf99"),
+                  "MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password\n") != NULL,
+           "  and lookup still answers without it");
+        st_saved = st_hush();
+        filter_write();
+        st_speak(st_saved);
+        Verbose = sv;
+        ck(Flt != NULL, "'filter' rewrites it to match");
+    }
+
     printf("\nsort order:\n");
     {
         /* A clean whole-index pass first -- this walks the directory and
@@ -6060,6 +6391,7 @@ static void usage(void)
 "       mdindex [-d dir] info\n"
 "       mdindex [-d dir] [-t threads] [-v] compact\n"
 "       mdindex [-d dir] [-v] check [index|overlay|all]\n"
+"       mdindex [-d dir] [-v] filter\n"
 "       mdindex selftest\n"
 "\n"
 "  -d dir      database directory (default %s)\n"
@@ -6216,6 +6548,8 @@ int main(int argc, char **argv)
         cmd_check(argc - 1, argv + 1);
     } else if (strcmp(argv[0], "compact") == 0) {
         cmd_compact();
+    } else if (strcmp(argv[0], "filter") == 0) {
+        cmd_filter();
     } else {
         cmd_lookup(argc, argv);        /* bare hashes, no command word */
     }

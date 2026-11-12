@@ -65,9 +65,9 @@ MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
 - **Many small jobs.** mdxfind is built to drive one enormous wordlist past
   one enormous hash list. The opposite shape — a great many small hash lists,
   each wanting an answer now — is what this is for.
-- **You do not know the type.** A record does not record which function
-  produced it. Every configured digest is regenerated from the line and
-  compared, so the answer arrives labelled.
+- **You do not know the type.** The answer is not stored: every configured
+  digest is regenerated from the line and compared, so the answer arrives
+  labelled.
 - **You only have part of the hash.** The stored key is 24 hex characters,
   and 16 still resolves about one candidate. Shorter works too; it just
   matches more.
@@ -103,8 +103,8 @@ mdindex selftest
 checks every digest against a published vector or against what mdxfind
 prints, checks both encoding wrappers, then builds a small index in a
 temporary directory and checks priority, partial lookup, the NTLM readings,
-the overlay, compaction, sort order and staleness detection end to end. It
-touches nothing else.
+the overlay, compaction, the filter, sort order and staleness detection end
+to end. It touches nothing else.
 
 ## Usage
 
@@ -116,6 +116,7 @@ mdindex [-d dir] [-v] [lookup] [hash ...]
 mdindex [-d dir] info
 mdindex [-d dir] [-t threads] [-v] compact
 mdindex [-d dir] [-v] check [index|overlay|all]
+mdindex [-d dir] [-v] filter
 mdindex selftest
 ```
 
@@ -157,19 +158,40 @@ words and not the index they join.
 **`lookup [hash ...]`** — Print `TYPE hash:plain` for every match. Nothing is
 printed for a hash that is absent; an absent hash is an answer, not an error.
 
+A whole-key query (24 hex characters or more) is first tested against the
+filter, `index.flt`, and is not probed at all if the filter rejects it. A
+probe is a random read of the main index; a rejection is one 4 KB page of a
+file a sixteenth its size, so a batch that is mostly misses costs a fraction
+of what it did. A shorter query names a range of keys, which a filter cannot
+speak for, and is probed as before. Measured on a 15.1-billion-record index,
+13,709 absent SHA1 hashes took 115.3 s without the filter and 5.85 s with it,
+the database on an SSD; with the database on a hard disk the filter's own
+page reads are seeks too, and the same list took 63.1 s.
+
 **`compact`** — Fold the overlay into the main index. The only command that
 rewrites it, and it reads and writes all of it, so it costs twice the index in
-I/O however small the overlay is. **Nothing needs compacting to be correct** —
-a lookup searches both files and gives the same answer either way.
+I/O however small the overlay is, and then rewrites the filter. **Nothing
+needs compacting to be correct** — a lookup searches both files and gives the
+same answer either way.
 
 **`check [index|overlay|all]`** — Verify that each bucket is strictly
 increasing on the stored key. A descending pair is a sort failure; an equal
 pair is a duplicate that deduplication should have dropped. `check overlay` is
 instant and is the one worth running after an update, which cannot have
-changed the main index. Exit 2 means a fault was found.
+changed the main index. `check index` also tests every key against the
+filter, and counts each one it rejects: a lookup for that key would report it
+absent. Exit 2 means a fault was found.
 
-**`info`** — Record and bucket counts, key width, hash types, and the
-manifest. Also runs the source checks and reports any ALERT.
+**`filter`** — Write `index.flt` for the index as it stands: one sequential
+pass over `index.rec`, with no source read and no hashing. This is the
+one-time step for a database built before the filter existed, and the repair
+for one whose filter lookup reports as not matching. `build` and `compact`
+write the filter themselves; `update` does not need to, because the filter
+covers `index.rec` only and the overlay is searched for every query
+regardless.
+
+**`info`** — Record and bucket counts, key width, hash types, the filter,
+and the manifest. Also runs the source checks and reports any ALERT.
 
 ### Options
 
@@ -205,8 +227,8 @@ free space on the database filesystem; this says you know. The projection is
 still printed.
 
 **`-v`** — Progress during build and update, and a per-phase timing breakdown
-during lookup: sort, index probe or scan, fetch and verify, and the number of
-digests regenerated.
+during lookup: sort, index probe or scan, how many queries the filter
+rejected, fetch and verify, and the number of digests regenerated.
 
 Progress is a percentage in the three phases that can run long — the per-source
 scatter, the 256-partition emit, and an `update`'s probe of the index, which is
@@ -223,10 +245,11 @@ there**, so a new type only ever enters through a full `build`. Neither
 
 ## The index is deliberately lossy
 
-A record stores **96 bits** of the digest, not all of it, and does not record
-which hash function produced it. Both are recovered rather than stored: a hit
-is answered by reading the line, regenerating every configured digest of it,
-and comparing against the whole hash you supplied.
+A record stores **96 bits** of the digest, not all of it, and the type it was
+made under. The type decides duplicates: two records are one word met again
+only when both key and type are equal. The answer is not stored: a hit is
+answered by reading the line, regenerating every configured digest of it, and
+comparing against the whole hash you supplied.
 
 So the index is only a filter, and the verification is exact. **A key collision
 costs one wasted read and prints nothing — it cannot produce a wrong answer.**
@@ -491,8 +514,8 @@ needed: every line mdindex emits carries the type that produced it, so with
 1,088 types in the manifest a hit *is* an identification.
 
 It is cheap because the type dimension is nearly free and the word dimension
-is what costs. Ten thousand words against 1,088 types is 884 MB and 13.9
-seconds to build, against 226 GB for the default index, and it scales
+is what costs. Ten thousand words against 1,088 types is about 1 GB and 14
+seconds to build, against some 256 GB for the default index, and it scales
 linearly in words. Querying it with 53.2 million hashes identified **27,067**
 of them under **238** distinct type names. The catch is that
 salted types cannot be indexed at all, so a salted list is not identifiable
@@ -566,6 +589,11 @@ file, the record kept is the one from the file that came **earliest on the
 build command line**. Within a file, the first occurrence wins. A word
 re-appearing in an updated file adds nothing.
 
+Every record carries its type, and dedup is decided by key and type alone,
+without reading a source line. Two different words reach one digest only
+through two different types — `MD5x02` of `password` is `MD5x01` of its own
+hex — and both are kept, so such a digest answers with both words.
+
 This is why the source order is part of the database and not a detail of how it
 was made: put your most trustworthy or best-spelled list first.
 
@@ -634,8 +662,9 @@ at crack time". The type table answers that, and the build enforces it — see
 |---|---|
 | `manifest` | Tab-separated text, the only human-readable file: version, hash-type list, then one row per source giving index, bytes consumed, size, mtime, line count and the head and tail fingerprints. |
 | `index.dir` | Bucket directory, 16,777,217 big-endian 64-bit offsets into `index.rec`, one per bucket plus a terminator. |
-| `index.rec` | The records, 15 bytes each, sorted by key: 9 bytes of digest residue then a 48-bit locator packing an 11-bit file index and a 37-bit offset. The other 24 bits of the 96-bit key are implied by the bucket. |
-| `add.rec` | The overlay: records added since the last build or compact, 18 bytes each — the whole 96-bit key, then the same locator — sorted, binary-searched, no directory of its own. |
+| `index.rec` | The records, 17 bytes each, sorted by key and type: 9 bytes of digest residue, the 2-byte type (its position in the manifest's type list), then a 48-bit locator packing an 11-bit file index and a 37-bit offset. The other 24 bits of the 96-bit key are implied by the bucket. |
+| `add.rec` | The overlay: records added since the last build or compact, 20 bytes each — the whole 96-bit key, the type, then the same locator — sorted, binary-searched, no directory of its own. |
+| `index.flt` | A blocked Bloom filter over every key in `index.rec`: a 4 KB header, then a power of two of 4 KB pages, at least 9 bits per key, k = 6, about 1.3% false positives — 16 GB at 15.1 billion records. It covers `index.rec` only. Its header records the record count and mtime of the `index.rec` it was built from, and a filter that does not match them is not used: lookup says so, and `mdindex filter` rebuilds it. Copy a database with `rsync -a`, which keeps mtimes. |
 | `part/` | Scratch partitions, present only while a build or update runs. Left behind means the run died; safe to delete. |
 
 **Anything that reads `index.rec` must take the record width from the same
@@ -644,9 +673,9 @@ reports every bucket unsorted the first time the format widens, which looks
 exactly like total corruption and is not.
 
 **Expect `index.rec` to be larger than the wordlists it indexes** — see
-[docs/SIZING.md](docs/SIZING.md). A record is 15 bytes whatever the word costs,
+[docs/SIZING.md](docs/SIZING.md). A record is 17 bytes whatever the word costs,
 and a line leaves about 3.6 of them after deduplication, so a 13-byte line
-occupies some 55 bytes of index.
+occupies some 61 bytes of index, plus about 1.1 bytes of filter per record.
 
 The database is worth excluding from backups; it is large and entirely derived.
 On macOS:
@@ -662,7 +691,7 @@ touch /usr/local/share/mdfind/.metadata_never_index
 |---|---|
 | 0 | Success, including a lookup that found nothing. |
 | 1 | Fatal: a source is missing or rewritten, the database is unreadable or of the wrong version, a configured type will not compile, the projected peak exceeds a tenth of the free space without `-y`, or an argument is wrong. |
-| 2 | A candidate failed its re-hash check, or `check` found a bucket out of order or a duplicate key. The index no longer matches a source, or no longer matches itself. |
+| 2 | A candidate failed its re-hash check, or `check` found a bucket out of order, a duplicate key, or a key the filter rejects. The index no longer matches a source, or no longer matches itself. |
 
 ## Further reading
 

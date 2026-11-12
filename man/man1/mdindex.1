@@ -1,5 +1,5 @@
 .\" mdindex(1) -- man-macro reference page
-.\" $Revision: 1.23 $
+.\" $Revision: 1.24 $
 .TH MDINDEX 1 "2026-11-07" "mdindex 1.38" "Password Recovery"
 .SH NAME
 mdindex \- index very large wordlists by hash, and look words up by digest
@@ -55,6 +55,12 @@ mdindex \- index very large wordlists by hash, and look words up by digest
 .RB [ \-v ]
 .B check
 .RI [ index | overlay | all ]
+.br
+.B mdindex
+.RB [ \-d
+.IR dir ]
+.RB [ \-v ]
+.B filter
 .br
 .B mdindex selftest
 .SH DESCRIPTION
@@ -312,7 +318,11 @@ overlay is.
 a lookup searches both files and gives the same answer either way.  Run it
 when
 .B update
-says the overlay is getting large, or whenever it suits.
+says the overlay is getting large, or whenever it suits.  It rewrites
+.I index.flt
+afterwards, as
+.B build
+does, which is one further read of the index.
 .TP
 .BI check " [index|overlay|all]"
 Read every record and verify that each bucket is strictly increasing on the
@@ -332,6 +342,31 @@ and is instant; that is the one worth running after an
 which cannot have changed
 .IR index.rec .
 The default is both.  Exit 2 means a fault was found.
+.IP
+.B check index
+also tests every key against
+.IR index.flt ,
+when one is in use, and counts each the filter rejects.  Any such key is a
+fault: a lookup for it would report it absent.
+.TP
+.B filter
+Write
+.I index.flt
+for the index as it stands: one sequential pass over
+.IR index.rec ,
+with no source read and no hashing.  This is the one-time step for a
+database built before the filter existed, and the repair for one whose
+filter
+.B lookup
+reports as not matching.
+.B build
+and
+.B compact
+write the filter themselves;
+.B update
+does not need to, because the filter covers
+.I index.rec
+only and the overlay is searched for every query regardless.
 .TP
 .BI lookup " [hash ...]"
 Print
@@ -371,6 +406,16 @@ switches to automatically above roughly
 .I records * 17 * 340 / 299e6
 queries \(em about 292,000 against the full-size index above.  See
 .B \-v.
+.IP
+Below that switch, a query for a whole key \(em 24 hex characters or more
+\(em is first tested against
+.IR index.flt ,
+when one is in use, and is not probed at all if the filter rejects it.  A
+probe is a random read of the main index; a rejection is one 4 KB page read
+of a file a sixteenth its size, so a batch that is mostly misses costs a
+fraction of what it did.  A shorter query names a range of keys, which a
+filter cannot speak for, and is probed as before.  The scan path does not
+use the filter: it reads the whole index once however many queries there are.
 .TP
 .B info
 Print the record and bucket counts, the key width, the hash types the
@@ -684,8 +729,8 @@ and
 .BR update ,
 and a per-phase timing breakdown during
 .B lookup
-\(em sort, index probe or scan, fetch and verify, and the number of digests
-regenerated.
+\(em sort, index probe or scan, how many queries the filter rejected, fetch
+and verify, and the number of digests regenerated.
 .IP
 Progress is a percentage, in the three phases that can run long: the
 per-source scatter, the 256-partition emit, and an
@@ -760,6 +805,33 @@ removed by
 .BR compact ,
 and searched by every lookup.  A record here is one the main index does not
 hold, so the two files never both answer for the same key.
+.TP
+.I index.flt
+A blocked Bloom filter over every key in
+.IR index.rec :
+a 4 KB header, then a power of two of 4 KB pages, sized to at least 9 bits per
+key \(em 2^22 pages, 16 GB, 9.1 bits per key at 15.1 billion records, with
+k = 6 and about 1.3% false positives.  A false positive costs the probe it
+would have cost anyway.  The key is already a digest, so it is its own hash:
+its leading bits choose the page and bytes 4 to 11 the bit positions within
+it.  Because pages follow key order, the file is written in one sequential
+pass and a sorted batch reads its pages in order.
+.IP
+The filter covers
+.I index.rec
+only, never
+.IR add.rec .
+Its header records the record count and mtime of the
+.I index.rec
+it was built from.  A filter that does not match them is not used, and
+lookup says so on standard error: a filter over a different set of keys would
+turn real hits into a silent absence.  Copying a database with
+.B rsync \-a
+keeps the mtimes and the filter with them; a copy that does not preserve
+mtimes leaves the filter unused until
+.B mdindex filter
+rewrites it.  Optional: a database without one answers the same queries, at
+probe speed.
 .TP
 .I part/
 Scratch partitions, present only while a build or update is running and
