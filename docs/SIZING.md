@@ -2,8 +2,11 @@
 
 Every figure here was measured on one reference build: three wordlists
 totalling 53.5 GB and 4,147,323,844 lines, indexed for **six** hash types, on
-a 16-core machine with the database on spinning storage. The type count is
-the figure to vary: everything below scales with it.
+a 16-core machine with the database on spinning storage. Figures for
+records, sizes and times were measured with 15-byte records, before mdindex
+1.38 added a 2-byte type to each; where the size depends on the record width,
+the 17-byte figure is given beside it. The type count is the figure to vary:
+everything below scales with it.
 
 ## The index is larger than the wordlists
 
@@ -11,13 +14,15 @@ This surprises people, so take it first.
 
 ```
 sources                        53.5 GB
-index.rec                     226.4 GB      4.2x
+index.rec, 15-byte records    226.4 GB      4.2x
+index.rec, 17-byte records    256.6 GB      4.8x   (15,094,084,891 records)
+index.flt                      17.2 GB
 ```
 
-A record is **15 bytes whatever the word costs**. One source line leaves about
+A record is **17 bytes whatever the word costs**. One source line leaves about
 3.6 records once duplicate keys are dropped — six hash types, and up to three
 NTLM readings of a non-ASCII word — so a line averaging 13 bytes of text
-occupies some 55 bytes of index.
+occupies some 61 bytes of index, plus about 1.1 bytes of filter per record.
 
 The ratio is a property of **the wordlist and the types you chose**, not of
 the index. It falls as the average line gets longer, and it scales with the
@@ -26,11 +31,11 @@ fraction of its own size; a list of six-character passwords indexed for fifty
 types is many times it.
 
 ```
-bytes of index per source line  ~=  types x records-per-type x 15 x kept
+bytes of index per source line  ~=  types x records-per-type x 17 x kept
 ```
 
 Six types give about 3.6 surviving records per line. Fifty give about thirty,
-and a 226 GB index becomes closer to 1.9 TB.
+and a 257 GB index becomes closer to 2.1 TB.
 
 Two things drive `kept` and they are easy to confuse. On this corpus most of
 the loss is **duplicate words** between the three source files, which is why
@@ -104,21 +109,28 @@ and computes anyway.
 ## Space to have free before a build
 
 ```
-scratch         lines x records-per-line x 18 bytes
-new index.rec   surviving records x 15 bytes
+scratch         lines x records-per-line x 20 bytes
+new index.rec   surviving records x 17 bytes
 old index.rec   survives until the rename
+index.flt       about 1.1 bytes per surviving record, written after
 ```
 
-Scratch is one 18-byte record per line **per type**, written before
-deduplication, so it is the largest of the three and it is transient. For the
-reference build:
+Scratch is one 20-byte record per line **per type** — the whole key, the type
+and the locator — written before deduplication, so it is the largest of the
+three and it is transient. For the reference build, measured with 18-byte
+scratch and 15-byte records, and scaled to the current widths:
 
 ```
-scratch                       449.7 GB
-new index.rec                 226.4 GB
-old index.rec                 226.4 GB
-peak observed                ~785    GB
+                             measured      at 20 and 17 bytes
+scratch                       449.7 GB      ~500 GB
+new index.rec                 226.4 GB      256.6 GB
+old index.rec                 226.4 GB      256.6 GB
+peak observed                ~785    GB      ~890 GB, computed
 ```
+
+The filter is written after the new index has replaced the old one and the
+scratch is gone, so it does not add to the peak. While it is written, the old
+filter and the new one both exist.
 
 Plan for roughly **1.5x the finished index, plus the finished index itself,
 plus whatever the old one occupies**. Scratch lives in `part/` inside the
@@ -131,6 +143,10 @@ build, total                 7,918.8 s     2 h 12 m
   of which hashing           3,895.3 s     1.06 M lines/s, 16 threads
   remainder                                sort, dedup, emit
 ```
+
+After the emit, `build` and `compact` write the filter in one sequential
+pass over `index.rec`. For a 256.6 GB index and a 17.2 GB filter, with the
+database on a hard disk, that pass took 1,355 s.
 
 The hashing phase is **I/O-bound, not CPU-bound**: it writes 449.7 GB of
 scratch at about 115 MB/s while reading 53.5 GB. Adding types costs less time
@@ -162,14 +178,30 @@ device gives. On the reference machine that is about 150 a second.
   digests regenerated            12,000
 ```
 
-A lookup is one random read to find the record and one more to read the line.
-The rate is the device's random-read rate, not the CPU's. A warm directory
-helps; nothing else does much.
+That run had no filter. A lookup is one random read to find the record and
+one more to read the line. The rate is the device's random-read rate, not the
+CPU's.
 
-Past a batch size of roughly `records x 15 x IOPS / sequential-bytes-per-sec`
-queries — about 257,000 against the reference index — mdindex stops probing
+The filter changes the cost of a miss. A whole-key query that the filter
+rejects reads one 4 KB page of `index.flt` and does not probe `index.rec`.
+13,709 SHA1 hashes, none in the index, against 15.1 billion records:
+
+```
+                                       lookup time    probed
+no filter, database on a hard disk       115.3 s      13,709
+filter, database on a hard disk           63.1 s         176
+filter, database on an SSD                 5.85 s        176
+```
+
+On a hard disk the filter page is itself a seek, so the filter roughly halves
+the cost of a miss. On an SSD the page read is cheap and the gain is about
+twenty times. A hit is probed and fetched as before.
+
+Past a batch size of roughly `records x 17 x IOPS / sequential-bytes-per-sec`
+queries — about 292,000 against the reference index — mdindex stops probing
 and makes one sequential pass over `index.rec` instead. It switches
-automatically.
+automatically. The constants are for the hard disk of the reference machine;
+on an SSD the probe rate is higher and a full pass pays off later.
 
 ## When a linear mdxfind run is cheaper
 
@@ -177,7 +209,8 @@ Because the index is 4.2x its sources, there is a crossover. mdindex's cost is
 roughly zero fixed plus one seek per hash; a linear pass is a large fixed cost
 and then nothing.
 
-With a lookup rate of ~100/s and sources read at ~200 MB/s:
+With a lookup rate of about 100/s, which is a hard disk with no filter, and
+sources read at about 200 MB/s:
 
 ```
 linear pass over 53.5 GB          ~268 s
@@ -195,4 +228,6 @@ enough, and it answers partial hashes and hashes whose type you do not know.
 
 Recompute these for your own hardware. The three inputs are your sequential
 read rate, your random-read rate at queue depth 1, and the total size of your
-sources.
+sources. With the filter, and above all with the database on an SSD, a list
+that is mostly misses moves the crossover much higher: the 13,709-hash list
+above took 5.85 s, where a linear pass takes minutes.

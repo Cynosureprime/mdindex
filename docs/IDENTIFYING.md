@@ -111,7 +111,10 @@ output any way you need.
 Measured, not projected. One machine, 16 cores — a workstation in
 interactive use, not a dedicated benchmark host, so treat every wall-clock
 figure here as indicative. Record counts and byte sizes are exact and
-reproducible; times are not.
+reproducible; times are not. The table was measured with 15-byte records,
+before mdindex 1.38 added a 2-byte type to each. Record counts are unchanged;
+`index.rec` is now 17/15 of the sizes shown, so the ident index is 849.3 MB,
+983.5 MB on disk before its filter.
 
 | | words | types | records | `index.rec` | on disk | build |
 |---|---|---|---|---|---|---|
@@ -120,7 +123,7 @@ reproducible; times are not.
 | the same, no HEXSALT | 10,001 | 1,072 | 10,416,259 | 156.2 MB | 290.5 MB | **3.1 s** |
 
 That is **4,996 records per word**, and the cost is linear in words: a
-wordlist of *n* words takes very close to `n x 4,996 x 15` bytes and
+wordlist of *n* words takes very close to `n x 4,996 x 17` bytes and
 proportional time. The relation holds to one part in ten thousand at a
 hundred thousand words: ten times the input, ten times the records.
 

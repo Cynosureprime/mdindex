@@ -9,7 +9,8 @@ constantly.
 build     rare       hours        rewrites everything
 update    nightly    seconds      writes only the overlay
 compact   seldom     ~2x index    folds the overlay in
-check     after      varies       verifies the invariant
+check     after      varies       verifies the invariant and the filter
+filter    once       one pass     writes index.flt for an existing index
 lookup    constant   milliseconds reads both pieces
 ```
 
@@ -18,6 +19,20 @@ a small sorted overlay beside it. `update` writes only the overlay, so a
 night's new words cost those words rather than the index they join. A lookup
 searches both and gives the same answer either way, so **nothing needs
 compacting to be correct**.
+
+Beside them is `index.flt`, a filter over the keys in `index.rec` that lets a
+lookup answer most misses without a probe. `build` and `compact` rewrite it;
+`update` does not need to, because the filter does not cover the overlay. A
+database made before mdindex 1.39 has none: run `mdindex filter` once.
+
+If you copy or move a database, keep the mtimes (`rsync -a`). The filter
+records the mtime of the `index.rec` it covers, and a copy with new mtimes
+leaves the filter unused until `mdindex filter` rewrites it. A lookup says so
+on standard error. A symbolic link to a database directory on another volume
+works; every file is written and renamed inside the directory.
+
+Put the database on an SSD if you can. Every probe and every filter test is a
+random read, and a hard disk gives about 150 of those a second.
 
 ## Nightly update
 
@@ -85,11 +100,11 @@ unfixable case.
 
 When you feel like it, or when `update` says the overlay is getting large —
 it prints a note past 256 MB. Every lookup binary-searches the overlay, so it
-is not free, but it is a sorted array of 18-byte records and it stays cheap
+is not free, but it is a sorted array of 20-byte records and it stays cheap
 for a long time. At a few hundred new records a night, years.
 
-`compact` reads and writes the entire main index however small the overlay is.
-Run it when the machine is otherwise idle.
+`compact` reads and writes the entire main index however small the overlay is,
+then rewrites the filter. Run it when the machine is otherwise idle.
 
 ## When to check
 
@@ -104,7 +119,9 @@ index. A full pass on an index an update cannot have touched is a check that
 gets switched off for being slow, which is worse than not having it.
 
 Exit 2 means a bucket is out of order or holds a duplicate key. Both have one
-cause, since deduplication only ever compares adjacent records.
+cause, since deduplication only ever compares adjacent records. `check index`
+also tests every key against the filter; a key the filter rejects is a fault,
+because a lookup for it would report it absent. `mdindex filter` repairs it.
 
 ## The type configuration is not live state
 
@@ -137,6 +154,7 @@ it.
 | `info` | reports it as an ALERT and names the type |
 | `check` | runs; it is structural and needs no hashing |
 | `compact` | runs; it moves records and computes nothing |
+| `filter` | runs; it reads keys and computes nothing |
 
 `update` refusing matters most: a degraded update would write an overlay
 missing one type's records and leave nothing behind to say so, and every
@@ -176,6 +194,6 @@ manifest; diff it against the script after any change.
 A lookup that finds nothing exits 0. Absence is an answer.
 
 That cuts both ways: a hash of a type the database does not index also
-produces silence, and the index cannot tell you which it was, because a record
-does not record which function made it. `mdindex info` lists the types. Run it
+produces silence, and the index cannot tell you which it was: a type it does
+not hold has no records to find. `mdindex info` lists the types. Run it
 first when a result surprises you.
